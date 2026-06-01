@@ -1,0 +1,374 @@
+name: Build truenas/amdxdna
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'truenas/amdxdna/**'
+      - '.github/workflows/build-truenas-amdxdna.yml'
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC daily — nightly builds
+  workflow_dispatch:
+    inputs:
+      single_version:
+        description: "Build only this TrueNAS tag/branch (e.g. TS-26.0.0-BETA.1). Leave blank for all."
+        required: false
+        default: ""
+      include_nightly:
+        description: "Include nightly (branch-based) entries from kernels.json"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: prepare-matrix
+  # ---------------------------------------------------------------------------
+  prepare-matrix:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: truenas/amdxdna
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build matrix from kernels.json
+        id: set
+        env:
+          SINGLE_VERSION:   ${{ inputs.single_version }}
+          EVENT_NAME:       ${{ github.event_name }}
+          INCLUDE_NIGHTLY:  ${{ inputs.include_nightly }}
+        run: bash builder/prepare_matrix.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 2: build-firmware
+  # ---------------------------------------------------------------------------
+  build-firmware:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: truenas/amdxdna
+    outputs:
+      fw_commit:       ${{ steps.head.outputs.fw_commit }}
+      fw_commit_short: ${{ steps.head.outputs.fw_commit_short }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get linux-firmware HEAD commit
+        id: head
+        run: |
+          fw_commit="$(git ls-remote \
+            https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git \
+            HEAD | cut -f1)"
+          echo "linux-firmware HEAD: ${fw_commit}"
+          echo "fw_commit=${fw_commit}"                   >> "$GITHUB_OUTPUT"
+          echo "fw_commit_short=${fw_commit:0:12}"        >> "$GITHUB_OUTPUT"
+
+      - name: Restore firmware sysext from cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: truenas/amdxdna/amdxdna-firmware-${{ steps.head.outputs.fw_commit_short }}.raw
+          key: amdxdna-firmware-raw-${{ steps.head.outputs.fw_commit }}
+
+      - name: Install packaging tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends squashfs-tools rsync
+
+      - name: Fetch amdnpu firmware
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash builder/1_fetch_firmware.sh
+
+      - name: Build firmware sysext image (.raw)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash builder/build_firmware_sysext.sh "${{ steps.head.outputs.fw_commit_short }}"
+
+      - name: Save firmware sysext to cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: truenas/amdxdna/amdxdna-firmware-${{ steps.head.outputs.fw_commit_short }}.raw
+          key: amdxdna-firmware-raw-${{ steps.head.outputs.fw_commit }}
+
+  # ---------------------------------------------------------------------------
+  # Job 3: prepare-headers
+  # ---------------------------------------------------------------------------
+  prepare-headers:
+    needs: prepare-matrix
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: truenas/amdxdna
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+        mode: [production, debug]
+    name: "headers / ${{ matrix.kernel.truenas_tag }} / ${{ matrix.mode }}"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore kernel headers from cache
+        id: cache-kernel
+        uses: actions/cache/restore@v4
+        with:
+          path: truenas/amdxdna/kernel-src
+          key: truenas-kernel-headers-${{ matrix.kernel.kernel_sha }}-${{ matrix.mode }}-v11
+
+      - name: Install kernel-prep dependencies
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential dwarves flex gawk git \
+            libcap-dev libelf-dev liblzma-dev libssl-dev \
+            make python3-dev
+
+      - name: Install Rust 1.91.1 + bindgen 0.72.1
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          rustup toolchain install 1.91.1-x86_64-unknown-linux-gnu --profile minimal
+          rustup default 1.91.1-x86_64-unknown-linux-gnu
+          rustup component add rust-src rustfmt
+          cargo install --locked bindgen-cli --version 0.72.1
+
+      - name: Clone and prepare kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        env:
+          KERNEL_SOURCE_REF: ${{ matrix.kernel.truenas_tag }}
+          BUILD_MODE:        ${{ matrix.mode }}
+        run: bash builder/2_prepare_headers.sh
+
+      - name: Save kernel headers to cache
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: truenas/amdxdna/kernel-src
+          key: truenas-kernel-headers-${{ matrix.kernel.kernel_sha }}-${{ matrix.mode }}-v11
+
+  # ---------------------------------------------------------------------------
+  # Job 4: build
+  # ---------------------------------------------------------------------------
+  build:
+    needs: [prepare-matrix, prepare-headers]
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: truenas/amdxdna
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+        mode: [production, debug]
+    name: "build / ${{ matrix.kernel.truenas_tag }} / ${{ matrix.mode }}"
+    outputs:
+      xdna_version: ${{ steps.build_ko.outputs.xdna_version }}
+      xrt_version:  ${{ steps.xrt_ver.outputs.xrt_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build + packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc build-essential flex git kmod \
+            libelf-dev libssl-dev make squashfs-tools
+
+      - name: Restore kernel headers from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: truenas/amdxdna/kernel-src
+          key: truenas-kernel-headers-${{ matrix.kernel.kernel_sha }}-${{ matrix.mode }}-v11
+          fail-on-cache-miss: true
+
+      - name: Clone xdna-driver
+        env:
+          XDNA_REF: ${{ matrix.kernel.xdna_ref }}
+        run: |
+          git clone --depth 1 --branch "${XDNA_REF}" \
+            https://github.com/amd/xdna-driver src/amdxdna-dkms || \
+          git clone --depth 1 https://github.com/amd/xdna-driver src/amdxdna-dkms
+
+      - name: Extract XRT version from submodule
+        id: xrt_ver
+        run: bash builder/get_xrt_version.sh src/amdxdna-dkms
+
+      - name: Generate config_kernel.h
+        env:
+          KERNEL_VERSION: ${{ matrix.kernel.base_version }}-${{ matrix.mode }}+truenas
+        run: |
+          drv_src="src/amdxdna-dkms/drivers/accel/amdxdna"
+          KERNEL_SRC="${GITHUB_WORKSPACE}/truenas/amdxdna/kernel-src" \
+            KERNEL_VER="${KERNEL_VERSION}" \
+            KBUILD_MODPOST_WARN=1 \
+            KCFLAGS="-Wno-unused-variable" \
+            OUT="${drv_src}/config_kernel.h" \
+            bash "src/amdxdna-dkms/drivers/accel/tools/configure_kernel.sh"
+
+      - name: Build amdxdna.ko
+        id: build_ko
+        env:
+          KERNEL_VERSION: ${{ matrix.kernel.base_version }}-${{ matrix.mode }}+truenas
+          KERNEL_SRC:     ${{ github.workspace }}/truenas/amdxdna/kernel-src
+          DRIVER_SRC:     ${{ github.workspace }}/truenas/amdxdna/src/amdxdna-dkms/drivers/accel/amdxdna
+        run: bash builder/build_ko.sh
+
+      - name: Build module sysext image (.raw)
+        env:
+          KERNEL_VERSION: ${{ matrix.kernel.base_version }}-${{ matrix.mode }}+truenas
+        run: |
+          bash builder/build_module_sysext.sh \
+            src/amdxdna-dkms/drivers/accel/amdxdna/amdxdna.ko
+
+      - name: Cache module sysext image
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            truenas/amdxdna/amdxdna-*.raw
+            truenas/amdxdna/module_version.txt
+            truenas/amdxdna/xrt_version.txt
+          key: amdxdna-raw-${{ github.run_id }}-${{ matrix.kernel.slug }}-${{ matrix.mode }}
+
+  # ---------------------------------------------------------------------------
+  # Job 5: package
+  # ---------------------------------------------------------------------------
+  package:
+    needs: [prepare-matrix, build, build-firmware]
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: truenas/amdxdna
+    name: "package"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools tar
+
+      # ── Restore firmware .raw ──────────────────────────────────────────────
+      - name: Restore firmware sysext from cache
+        uses: actions/cache/restore@v4
+        with:
+          path: truenas/amdxdna/amdxdna-firmware-${{ needs.build-firmware.outputs.fw_commit_short }}.raw
+          key: amdxdna-firmware-raw-${{ needs.build-firmware.outputs.fw_commit }}
+          fail-on-cache-miss: true
+
+      # ── Restore per-kernel module .raw (one step per matrix entry × mode) ──
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            truenas/amdxdna/amdxdna-*.raw
+            truenas/amdxdna/module_version.txt
+            truenas/amdxdna/xrt_version.txt
+          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-production
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            truenas/amdxdna/amdxdna-*.raw
+            truenas/amdxdna/module_version.txt
+            truenas/amdxdna/xrt_version.txt
+          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-debug
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            truenas/amdxdna/amdxdna-*.raw
+            truenas/amdxdna/module_version.txt
+            truenas/amdxdna/xrt_version.txt
+          key: amdxdna-raw-${{ github.run_id }}-truenas-linux-6.18-production
+          fail-on-cache-miss: false
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            truenas/amdxdna/amdxdna-*.raw
+            truenas/amdxdna/module_version.txt
+            truenas/amdxdna/xrt_version.txt
+          key: amdxdna-raw-${{ github.run_id }}-truenas-linux-6.18-debug
+          fail-on-cache-miss: false
+
+      # ── Assemble amdxdna-override .run ────────────────────────────────────
+      - name: Assemble amdxdna-override .run installer
+        env:
+          BUILD_RUN_ID:     ${{ github.run_id }}
+          BUILD_SHA:        ${{ github.sha }}
+          AMDXDNA_VERSION:  ${{ needs.build.outputs.xdna_version }}
+        run: bash builder/assemble_amdxdna_run.sh
+
+      # ── Assemble amdnpu-firmware .run ─────────────────────────────────────
+      - name: Assemble amdnpu-firmware .run installer
+        env:
+          BUILD_RUN_ID:     ${{ github.run_id }}
+          BUILD_SHA:        ${{ github.sha }}
+          FW_COMMIT_SHORT:  ${{ needs.build-firmware.outputs.fw_commit_short }}
+        run: bash builder/assemble_firmware_run.sh
+
+      # ── Read final version ────────────────────────────────────────────────
+      - name: Read xdna version
+        id: ver
+        run: echo "xdna_ver=$(cat out/version.txt)" >> "$GITHUB_OUTPUT"
+
+      # ── Upload artifacts ──────────────────────────────────────────────────
+      - name: Upload amdxdna-override .run
+        uses: actions/upload-artifact@v4
+        with:
+          name: amdxdna-override-${{ steps.ver.outputs.xdna_ver }}
+          path: truenas/amdxdna/out/amdxdna-override-${{ steps.ver.outputs.xdna_ver }}.run
+          retention-days: 30
+
+      - name: Upload amdnpu-firmware .run
+        uses: actions/upload-artifact@v4
+        with:
+          name: amdnpu-firmware-${{ needs.build-firmware.outputs.fw_commit_short }}
+          path: truenas/amdxdna/out/amdnpu-firmware-${{ needs.build-firmware.outputs.fw_commit_short }}.run
+          retention-days: 30
+
+      # ── GitHub Release (main branch pushes only) ──────────────────────────
+      - name: Check if release already exists
+        id: check-release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          if gh release view "v${{ steps.ver.outputs.xdna_ver }}" \
+              --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create GitHub Release
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.check-release.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.xdna_ver }}
+          name: amdxdna ${{ steps.ver.outputs.xdna_ver }}
+          body: |
+            AMD XDNA kernel module + NPU firmware sysext for TrueNAS SCALE.
+
+            Built from [amd/xdna-driver](https://github.com/amd/xdna-driver) version ${{ steps.ver.outputs.xdna_ver }}.
+
+            ## Install XDNA kernel module
+            ```bash
+            bash amdxdna-override-${{ steps.ver.outputs.xdna_ver }}.run
+            ```
+            Auto-detects the running kernel and selects the correct module variant.
+
+            ## Update AMD NPU firmware only
+            ```bash
+            bash amdnpu-firmware-${{ needs.build-firmware.outputs.fw_commit_short }}.run
+            ```
+            Installs just the firmware sysext without touching kernel modules.
+          files: truenas/amdxdna/out/*.run
