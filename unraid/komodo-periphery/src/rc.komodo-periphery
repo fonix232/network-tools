@@ -1,0 +1,81 @@
+#!/bin/bash
+# Komodo Periphery — UnRaid rc.d service script
+# Lives on flash at /boot/config/plugins/komodo-periphery/rc.komodo-periphery
+# Started by /usr/local/emhttp/plugins/komodo-periphery/event/started
+# Stopped by /usr/local/emhttp/plugins/komodo-periphery/event/stopping_svcs
+
+PLUGIN_DIR="/boot/config/plugins/komodo-periphery"
+BINARY_SRC="$PLUGIN_DIR/periphery"
+BINARY="/usr/local/bin/periphery"
+KOMODO_SRC="/boot/config/komodo-periphery"
+KOMODO="/etc/komodo"
+PIDFILE="/var/run/komodo-periphery.pid"
+LOGFILE="/var/log/komodo-periphery.log"
+
+# Restore binary and all of /etc/komodo from flash into RAM (required every boot).
+setup() {
+    install -m 0755 "$BINARY_SRC" "$BINARY"
+    # Restore /etc/komodo from flash if present (keys, SSL certs, config)
+    if [ -d "$KOMODO_SRC" ] && [ -n "$(ls -A "$KOMODO_SRC" 2>/dev/null)" ]; then
+        mkdir -p "$KOMODO"
+        cp -rp "$KOMODO_SRC"/. "$KOMODO"/ 2>/dev/null || true
+    fi
+}
+
+# Flush all of /etc/komodo back to flash for persistence across reboots.
+save() {
+    if [ -d "$KOMODO" ] && [ -n "$(ls -A "$KOMODO" 2>/dev/null)" ]; then
+        mkdir -p "$KOMODO_SRC"
+        cp -rp "$KOMODO"/. "$KOMODO_SRC"/ 2>/dev/null || true
+    fi
+}
+
+start() {
+    if [ ! -f "$BINARY_SRC" ]; then
+        echo "komodo-periphery: binary not downloaded yet — visit Plugins -> Komodo Periphery"
+        return 0
+    fi
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "komodo-periphery is already running (PID $(cat "$PIDFILE"))"
+        return 0
+    fi
+    setup
+    echo "Starting komodo-periphery..."
+    # Ensure /usr/local/bin is on PATH so that git filter subprocesses (e.g.
+    # git-crypt) can be found.  emhttp may start this script with a minimal
+    # PATH that omits /usr/local/bin; the export propagates to periphery and
+    # all children (git → clean/smudge filter subprocess).
+    export PATH="/usr/local/bin:$PATH"
+    "$BINARY" --config-path "$KOMODO/periphery.config.toml" >> "$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    echo "komodo-periphery started (PID $(cat "$PIDFILE"))"
+}
+
+stop() {
+    if [ ! -f "$PIDFILE" ] || ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "komodo-periphery is not running"
+        rm -f "$PIDFILE"
+        save
+        return 0
+    fi
+    echo "Stopping komodo-periphery..."
+    kill "$(cat "$PIDFILE")" && rm -f "$PIDFILE"
+    save
+    echo "komodo-periphery stopped"
+}
+
+status() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "running (PID $(cat "$PIDFILE"))"
+    else
+        echo "stopped"
+    fi
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; start ;;
+    status)  status ;;
+    *)       echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

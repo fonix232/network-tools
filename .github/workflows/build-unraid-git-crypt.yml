@@ -1,0 +1,23 @@
+name: Build unraid/git-crypt
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'unraid/git-crypt/src/**'
+      - 'unraid/git-crypt/manifest.json'
+      - 'unraid/common/**'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    with:
+      component_label: unraid/git-crypt
+      tag_prefix: unraid-git-crypt
+      build_working_directory: unraid/git-crypt
+      build_command: python3 ../common/assemble.py --version "$VERSION"
+      artifact_path: unraid/git-crypt/git-crypt.plg
+      extra_release_notes: |
+        Install via Unraid Plugins > Install Plugin using the released .plg URL from this release.
+    secrets: inherit

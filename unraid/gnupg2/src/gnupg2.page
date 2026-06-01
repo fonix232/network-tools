@@ -1,0 +1,342 @@
+Menu="Utilities"
+Title="GnuPG"
+Icon="lock"
+Tag="key"
+---
+<?php
+/*
+ * gnupg2 -- UnRaid management page
+ * IMPORTANT: PHP-included inside emhttp. No header(), exit(), die().
+ * No remote HTTP from PHP. All mutations via api.php fetch().
+ */
+
+function gp_h(string $s): string {
+    return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
+}
+
+// Installed package versions
+$gp_packages = [];
+$gp_pkg_names = ['gnupg2', 'libassuan', 'libksba', 'npth'];
+foreach ($gp_pkg_names as $pn) {
+    $matches = glob("/var/lib/pkgtools/packages/$pn-*");
+    $ver = '';
+    foreach ($matches as $m) {
+        if (preg_match('/^' . preg_quote($pn, '/') . '-([^-]+-[^-]+-[^-]+)$/', basename($m), $hit)) {
+            $ver = $hit[1];
+        }
+    }
+    $gp_packages[] = ['name' => $pn, 'version' => $ver];
+}
+
+$gp_gpg_ver = '';
+exec('gpg --version 2>/dev/null | head -1', $gp_ver_out);
+$gp_gpg_ver = implode('', $gp_ver_out);
+
+$gp_flash_ok = is_dir('/boot/config/gnupg');
+?>
+
+<style>
+.gp-section { margin-bottom: 24px; }
+.gp-table { border-collapse: collapse; width: auto; min-width: 400px; }
+.gp-table th, .gp-table td { padding: 6px 14px; text-align: left; border-bottom: 1px solid #333; }
+.gp-table th { font-weight: bold; }
+.gp-key-fpr { font-family: monospace; font-size: 0.85em; }
+.gp-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; }
+.gp-badge-ok { background: #2d5f2d; color: #cfc; }
+.gp-badge-warn { background: #5f4f2d; color: #fec; }
+.gp-badge-none { background: #444; color: #aaa; }
+.gp-actions { margin-top: 8px; }
+.gp-cap-badge { display:inline-block; width:1.4em; text-align:center; border-radius:3px; font-size:0.8em; font-weight:bold; font-family:monospace; padding:1px 0; margin-right:2px; }
+.gp-cap-s { background:#1e3a7f; color:#adf; }
+.gp-cap-c { background:#4a2d8f; color:#ccf; }
+.gp-cap-e { background:#1e5f2d; color:#cfc; }
+.gp-cap-a { background:#7f4f1e; color:#fec; }
+#gp-import-box { display: none; margin-top: 12px; }
+#gp-import-box textarea { width: 100%; max-width: 600px; height: 120px; font-family: monospace; font-size: 0.85em; }
+#gp-export-box { display: none; margin-top: 12px; }
+#gp-export-box textarea { width: 100%; max-width: 600px; height: 160px; font-family: monospace; font-size: 0.85em; }
+</style>
+
+<script>
+var GP_API = '/plugins/gnupg2/api.php';
+function gpCsrf() { return (typeof csrf_token !== 'undefined') ? csrf_token : ''; }
+
+function gpFlash(ok, msg) {
+    var el = document.getElementById('gp-flash');
+    if (!el) {
+        el = document.createElement('div'); el.id = 'gp-flash';
+        var first = document.querySelector('.title');
+        if (first) first.parentNode.insertBefore(el, first);
+        else document.body.insertBefore(el, document.body.firstChild);
+    }
+    el.className = 'notice ' + (ok ? 'notice-green' : 'notice-red');
+    el.innerHTML = '<pre style="margin:0;white-space:pre-wrap">' + String(msg).replace(/</g, '&lt;') + '</pre>';
+    el.scrollIntoView({behavior: 'smooth'});
+}
+
+function gpCall(data, btn, noReload) {
+    var orig = btn ? btn.value : null;
+    if (btn) { btn.disabled = true; btn.value = 'Working\u2026'; }
+    var payload = Object.assign({}, data, {csrf_token: gpCsrf()});
+    return fetch(GP_API, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        if (btn) { btn.disabled = false; btn.value = orig; }
+        gpFlash(j.ok, j.msg || '');
+        if (j.ok && !noReload) setTimeout(function() { location.reload(); }, 800);
+        return j;
+    })
+    .catch(function(e) {
+        if (btn) { btn.disabled = false; btn.value = orig; }
+        gpFlash(false, 'Request failed: ' + e);
+    });
+}
+
+function gpCheckUpdates(btn) {
+    var orig = btn.value; btn.disabled = true; btn.value = 'Checking\u2026';
+    fetch(GP_API + '?action=check_updates')
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        btn.disabled = false; btn.value = orig;
+        if (!j.ok) { gpFlash(false, j.msg || 'Failed to check updates.'); return; }
+
+        var updates = [];
+        var tbody = document.getElementById('gp-pkg-body');
+        j.packages.forEach(function(p) {
+            // Find matching row
+            var cells = tbody.querySelectorAll('tr');
+            cells.forEach(function(row) {
+                if (row.cells[0] && row.cells[0].textContent.trim() === p.name) {
+                    var avail = p.filename.replace(p.name + '-', '').replace('.txz', '');
+                    row.cells[2].textContent = avail;
+                    if (avail !== p.installed) {
+                        row.cells[2].style.color = '#fc3';
+                        updates.push(p.name);
+                    } else {
+                        row.cells[2].style.color = '#8f8';
+                    }
+                }
+            });
+        });
+
+        if (updates.length > 0) {
+            gpFlash(false, 'Updates available for: ' + updates.join(', '));
+            document.getElementById('gp-update-btn').style.display = '';
+        } else {
+            gpFlash(true, 'All packages are up to date.');
+        }
+    })
+    .catch(function(e) { btn.disabled = false; btn.value = orig; gpFlash(false, 'Failed: ' + e); });
+}
+
+function gpInstallPackages(btn) {
+    gpCall({action: 'install_packages'}, btn);
+}
+
+function gpAlgoName(algo, bits) {
+    var m = {'1':'RSA','17':'DSA','18':'ECDH','19':'ECDSA','22':'EdDSA'};
+    var n = m[String(algo)] || ('Algo' + algo);
+    if (n === 'EdDSA' && String(bits) === '255') return 'ed25519';
+    if (n === 'ECDH'  && String(bits) === '255') return 'cv25519';
+    if (n === 'RSA') return 'RSA-' + bits;
+    if ((n === 'ECDSA' || n === 'ECDH') && bits) return n + '-' + bits;
+    return n;
+}
+
+function gpCapsBadges(caps) {
+    if (!caps) return '<span style="color:#888">&mdash;</span>';
+    var lower = caps.toLowerCase();
+    var out = '';
+    if (lower.indexOf('s') !== -1) out += '<span class="gp-cap-badge gp-cap-s" title="Sign">S</span>';
+    if (lower.indexOf('c') !== -1) out += '<span class="gp-cap-badge gp-cap-c" title="Certify">C</span>';
+    if (lower.indexOf('e') !== -1) out += '<span class="gp-cap-badge gp-cap-e" title="Encrypt">E</span>';
+    if (lower.indexOf('a') !== -1) out += '<span class="gp-cap-badge gp-cap-a" title="Authenticate">A</span>';
+    return out || '<span style="color:#888">&mdash;</span>';
+}
+
+function gpGenerateKey(btn) {
+    var name = document.getElementById('gp-gen-name').value.trim();
+    var email = document.getElementById('gp-gen-email').value.trim();
+    if (!name) { gpFlash(false, 'Name is required.'); return; }
+    var algo = document.getElementById('gp-gen-algo').value;
+    var usages = ['cert'];
+    if (document.getElementById('gp-gen-sign').checked) usages.push('sign');
+    if (document.getElementById('gp-gen-auth').checked) usages.push('auth');
+    var encr = document.getElementById('gp-gen-encr').checked ? '1' : '0';
+    gpCall({action: 'generate_key', key_name: name, key_email: email,
+            key_algo: algo, key_usages: usages.join(','), key_encr: encr}, btn);
+}
+
+function gpDeleteKey(fpr, btn) {
+    if (!confirm('Delete key ' + fpr + '? This cannot be undone.')) return;
+    gpCall({action: 'delete_key', fingerprint: fpr}, btn);
+}
+
+function gpExportKey(fpr) {
+    fetch(GP_API + '?action=export_key&fingerprint=' + encodeURIComponent(fpr))
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        if (!j.ok) { gpFlash(false, j.msg || 'Export failed.'); return; }
+        var box = document.getElementById('gp-export-box');
+        document.getElementById('gp-export-text').value = j.armor;
+        box.style.display = '';
+        box.scrollIntoView({behavior: 'smooth'});
+    })
+    .catch(function(e) { gpFlash(false, 'Export failed: ' + e); });
+}
+
+function gpImportKey(btn) {
+    var armor = document.getElementById('gp-import-text').value.trim();
+    if (!armor) { gpFlash(false, 'Paste a PGP public key block.'); return; }
+    gpCall({action: 'import_key', armor: armor}, btn);
+}
+
+function gpToggleImport() {
+    var box = document.getElementById('gp-import-box');
+    box.style.display = box.style.display === 'none' ? '' : 'none';
+}
+</script>
+
+<!-- ======================= PACKAGES ======================= -->
+<div class="title gp-section"><span class="left">GnuPG Packages</span></div>
+<div class="pluginUpdate" style="margin-bottom:20px">
+  <p><?= gp_h($gp_gpg_ver) ?></p>
+  <table class="gp-table">
+    <thead>
+      <tr><th>Package</th><th>Installed</th><th>Available</th></tr>
+    </thead>
+    <tbody id="gp-pkg-body">
+      <?php foreach ($gp_packages as $p): ?>
+      <tr>
+        <td><?= gp_h($p['name']) ?></td>
+        <td><?= $p['version'] ? gp_h($p['version']) : '<span class="gp-badge gp-badge-none">not found</span>' ?></td>
+        <td>&mdash;</td>
+      </tr>
+      <?php endforeach; ?>
+    </tbody>
+  </table>
+  <div class="gp-actions">
+    <input type="button" value="Check for updates" onclick="gpCheckUpdates(this)">
+    <input type="button" value="Download &amp; install all" id="gp-update-btn" style="display:none" onclick="gpInstallPackages(this)">
+  </div>
+</div>
+
+<!-- ======================= GPG KEYS ======================= -->
+<div class="title gp-section"><span class="left">GPG Keys</span></div>
+<div class="pluginUpdate" style="margin-bottom:20px">
+  <div id="gp-keys-loading">Loading keys&hellip;</div>
+  <table class="gp-table" id="gp-keys-table" style="display:none">
+    <thead>
+      <tr><th>UID</th><th>Fingerprint</th><th>Algorithm</th><th>Capabilities</th><th>Created</th><th>Type</th><th></th></tr>
+    </thead>
+    <tbody id="gp-keys-body"></tbody>
+  </table>
+  <div class="gp-actions">
+    <input type="button" value="Import key" onclick="gpToggleImport()">
+  </div>
+  <div id="gp-import-box">
+    <p>Paste an ASCII-armored PGP public key:</p>
+    <textarea id="gp-import-text" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea>
+    <br>
+    <input type="button" value="Import" onclick="gpImportKey(this)">
+  </div>
+  <div id="gp-export-box">
+    <p>Exported public key:</p>
+    <textarea id="gp-export-text" readonly></textarea>
+  </div>
+
+  <hr style="border-color:#444; margin:16px 0">
+  <p><strong>Generate new key</strong></p>
+  <table style="border:none;border-collapse:collapse;margin-bottom:8px">
+    <tr>
+      <td style="padding:4px 8px 4px 0">Name</td>
+      <td><input type="text" id="gp-gen-name" style="width:16em" placeholder="e.g. <?= gp_h(strtolower(gethostname())) ?>"></td>
+      <td style="padding:4px 8px">Email</td>
+      <td><input type="text" id="gp-gen-email" style="width:18em" placeholder="e.g. <?= gp_h(strtolower(gethostname())) ?>@example.com (optional)"></td>
+    </tr>
+    <tr>
+      <td style="padding:4px 8px 4px 0">Algorithm</td>
+      <td>
+        <select id="gp-gen-algo">
+          <option value="ed25519" selected>ed25519 (recommended)</option>
+          <option value="rsa4096">RSA 4096</option>
+          <option value="rsa2048">RSA 2048</option>
+          <option value="nistp256">NIST P-256</option>
+          <option value="nistp384">NIST P-384</option>
+          <option value="nistp521">NIST P-521</option>
+        </select>
+      </td>
+      <td style="padding:4px 8px">Capabilities</td>
+      <td>
+        <label style="margin-right:10px"><input type="checkbox" checked disabled> cert (always)</label>
+        <label style="margin-right:10px"><input type="checkbox" id="gp-gen-sign" checked> sign</label>
+        <label style="margin-right:10px"><input type="checkbox" id="gp-gen-auth"> auth</label>
+        <label><input type="checkbox" id="gp-gen-encr" checked> add encryption subkey</label>
+      </td>
+    </tr>
+  </table>
+  <input type="button" value="Generate" onclick="gpGenerateKey(this)">
+  <p style="font-size:0.85em;margin-top:6px">No passphrase, no expiry. The encryption subkey algorithm is automatically paired with the primary key algorithm.</p>
+</div>
+
+<!-- ======================= BACKUP ======================= -->
+<div class="title gp-section"><span class="left">Keyring Backup</span></div>
+<div class="pluginUpdate" style="margin-bottom:20px">
+  <p>
+    Flash backup: <?= $gp_flash_ok
+        ? '<span class="gp-badge gp-badge-ok">present</span> at <code>/boot/config/gnupg/</code>'
+        : '<span class="gp-badge gp-badge-warn">not found</span>' ?>
+  </p>
+  <p style="font-size:0.85em">
+    Keys are automatically backed up on shutdown and restored on array start.
+  </p>
+  <div class="gp-actions">
+    <input type="button" value="Backup now" onclick="gpCall({action:'backup'},this)">
+    <input type="button" value="Restore from flash" onclick="if(confirm('Restore keyring from flash? This will overwrite the current keyring.'))gpCall({action:'restore'},this)">
+  </div>
+</div>
+
+<script>
+// Load keys on page load
+(function() {
+    fetch(GP_API + '?action=status')
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        document.getElementById('gp-keys-loading').style.display = 'none';
+        if (!j.ok || !j.keys) return;
+        var tbody = document.getElementById('gp-keys-body');
+        document.getElementById('gp-keys-table').style.display = '';
+        if (j.keys.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="color:#888">No keys found.</td></tr>';
+            return;
+        }
+        j.keys.forEach(function(k) {
+            var fprShort = k.fpr.substring(k.fpr.length - 16);
+            var created = k.created ? new Date(parseInt(k.created) * 1000).toISOString().split('T')[0] : '';
+            var type = k.secret
+                ? '<span class="gp-badge gp-badge-ok">sec+pub</span>'
+                : '<span class="gp-badge gp-badge-none">pub</span>';
+            var row = '<tr>' +
+                '<td>' + (k.uid || '').replace(/</g, '&lt;') + '</td>' +
+                '<td class="gp-key-fpr" title="' + k.fpr + '">' + fprShort + '</td>' +
+                '<td>' + gpAlgoName(k.algo, k.bits) + '</td>' +
+                '<td>' + gpCapsBadges(k.caps) + '</td>' +
+                '<td>' + created + '</td>' +
+                '<td>' + type + '</td>' +
+                '<td>' +
+                    '<input type="button" value="Export" onclick="gpExportKey(\'' + k.fpr + '\')" style="margin-right:4px">' +
+                    '<input type="button" value="Delete" onclick="gpDeleteKey(\'' + k.fpr + '\',this)">' +
+                '</td>' +
+                '</tr>';
+            tbody.innerHTML += row;
+        });
+    })
+    .catch(function(e) {
+        document.getElementById('gp-keys-loading').textContent = 'Failed to load keys: ' + e;
+    });
+})();
+</script>

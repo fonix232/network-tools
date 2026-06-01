@@ -1,0 +1,4 @@
+#!/bin/bash
+# Called by emhttp before services stop (array going down).
+# Saves keys and config back to flash, then stops the daemon.
+sh /boot/config/plugins/komodo-periphery/rc.komodo-periphery stop

@@ -1,0 +1,56 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name       "git-crypt">
+  <!ENTITY version    "__VERSION__">
+  <!ENTITY plugin_dir "/boot/config/plugins/git-crypt">
+]>
+<PLUGIN name="&name;" version="&version;" min="6.10.0">
+
+<CHANGES>
+### __VERSION__
+- Downloads latest git-crypt linux-x86_64 binary from GitHub releases on install
+- Restores cached binary from flash on every array start
+- Web UI for install/update/version checks
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/git-crypt/event/started" Mode="0755">
+<INLINE>
+<![CDATA[
+__EVENT_STARTED__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/git-crypt/git-crypt.page" Mode="0644">
+<INLINE>
+<![CDATA[
+__WEB_PAGE__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/git-crypt/api.php" Mode="0644">
+<INLINE>
+<![CDATA[
+__API_PHP__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+__INSTALL_SH__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+__REMOVE_SH__
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>

@@ -1,0 +1,525 @@
+Menu="Utilities"
+Title="Komodo Periphery"
+Icon="puzzle-piece"
+Tag="cogs"
+---
+<?php
+/*
+ * Komodo Periphery -- UnRaid management page
+ * IMPORTANT: PHP-included inside emhttp. No header(), exit(), die().
+ * No remote HTTP from PHP. No <form> tags. All mutations via api.php fetch().
+ */
+
+$kp_PLUGIN_DIR = '/boot/config/plugins/komodo-periphery';
+$kp_BINARY     = "$kp_PLUGIN_DIR/periphery";
+$kp_FLASH_CFG  = "$kp_PLUGIN_DIR/periphery.config.toml";
+$kp_LIVE_CFG   = '/etc/komodo/periphery.config.toml';
+$kp_PIDFILE    = '/var/run/komodo-periphery.pid';
+$kp_LOGFILE    = '/var/log/komodo-periphery.log';
+$kp_VER_FILE   = "$kp_PLUGIN_DIR/version";
+
+function kp_h(string $s): string {
+    return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
+}
+function kp_svc_running(string $pidfile): array {
+    if (!file_exists($pidfile)) return ['running' => false, 'pid' => null];
+    $pid = (int) trim(file_get_contents($pidfile));
+    $running = $pid > 0 && file_exists("/proc/$pid");
+    return ['running' => $running, 'pid' => $running ? $pid : null];
+}
+function kp_mnt_shares(): array {
+    $shares = [];
+    if (!file_exists('/proc/mounts')) return $shares;
+    foreach (file('/proc/mounts') as $line) {
+        $mp = preg_split('/\s+/', trim($line))[1] ?? '';
+        if (preg_match('#^/mnt/[^/]+$#', $mp)) $shares[] = $mp;
+    }
+    sort($shares);
+    return array_unique($shares);
+}
+function kp_read_cfg(string $live, string $flash): string {
+    if (file_exists($live))  return file_get_contents($live);
+    if (file_exists($flash)) return file_get_contents($flash);
+    return '';
+}
+function kp_is_paired(string $cfg): bool {
+    foreach (explode("\n", $cfg) as $l) {
+        $l = trim($l);
+        if ($l === '' || $l[0] === '#') continue;
+        if (preg_match('/^\s*(core_address|core_public_keys)\s*=\s*"(.+)"/', $l, $m) && $m[2] !== '')
+            return true;
+    }
+    return false;
+}
+
+// Parse scalar (non-table) key=value pairs from TOML, ignoring comments and tables
+function kp_parse_toml(string $raw): array {
+    $vals = [];
+    $in_table = false;
+    foreach (explode("\n", $raw) as $line) {
+        $l = trim($line);
+        if ($l === '' || $l[0] === '#') continue;
+        // Detect start of table/array-of-tables section
+        if ($l[0] === '[') { $in_table = true; continue; }
+        if ($in_table) continue;
+        if (preg_match('/^([a-zA-Z0-9_.]+)\s*=\s*(.+)/', $l, $m)) {
+            $vals[trim($m[1])] = trim($m[2]);
+        }
+    }
+    return $vals;
+}
+
+// Extract raw tail sections (git_provider, docker_registry, secrets, passkeys table etc.)
+function kp_tail_sections(string $raw): string {
+    $lines  = explode("\n", $raw);
+    $result = [];
+    $in_tail = false;
+    foreach ($lines as $line) {
+        $l = trim($line);
+        if (!$in_tail && $l !== '' && $l[0] === '[') {
+            $in_tail = true;
+        }
+        if ($in_tail) $result[] = $line;
+    }
+    return implode("\n", $result);
+}
+
+$kp_inst_ver  = file_exists($kp_VER_FILE) ? trim(file_get_contents($kp_VER_FILE)) : '';
+$kp_binary_ok = file_exists($kp_BINARY) && $kp_inst_ver !== '';
+$kp_cfg_raw   = kp_read_cfg($kp_LIVE_CFG, $kp_FLASH_CFG);
+$kp_paired    = kp_is_paired($kp_cfg_raw);
+$kp_state     = !$kp_binary_ok ? 'NOT_INSTALLED' : (!$kp_paired ? 'NOT_PAIRED' : 'READY');
+$kp_status    = kp_svc_running($kp_PIDFILE);
+$kp_mounts    = kp_mnt_shares();
+$kp_cv        = kp_parse_toml($kp_cfg_raw);  // current scalar values
+$kp_tail      = kp_tail_sections($kp_cfg_raw);
+
+// Convert ANSI escape codes to HTML. Text portions are HTML-escaped.
+function kp_ansi2html(string $text): string {
+    static $fg = [
+        '30' => '#555', '31' => '#e06c75', '32' => '#98c379',
+        '33' => '#e5c07b', '34' => '#61afef', '35' => '#c678dd',
+        '36' => '#56b6c2', '37' => '#abb2bf', '39' => null,
+        '90' => '#666', '91' => '#ff7b7b', '92' => '#b5e890',
+        '93' => '#ffe08a', '94' => '#9ac8ff', '95' => '#e0a0ff',
+        '96' => '#80d9e9', '97' => '#fff',
+    ];
+    $out   = '';
+    $depth = 0;
+    // Split on ESC[ sequences; PREG_SPLIT_DELIM_CAPTURE gives alternating text/code
+    $parts = preg_split('/\x1b\[([0-9;]*)m/', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
+    // Also strip remaining non-colour ESC sequences (OSC, cursor, etc.)
+    $strip = static function(string $s): string {
+        return preg_replace('/\x1b[^\x1b]*?[A-Za-z]/', '', $s);
+    };
+    for ($i = 0, $n = count($parts); $i < $n; $i++) {
+        if ($i % 2 === 0) {
+            $out .= htmlspecialchars($strip($parts[$i]), ENT_QUOTES, 'UTF-8');
+        } else {
+            foreach (explode(';', $parts[$i] !== '' ? $parts[$i] : '0') as $code) {
+                $code = ltrim($code, '0') ?: '0';
+                if ($code === '0' || $code === '') {
+                    $out  .= str_repeat('</span>', $depth);
+                    $depth = 0;
+                } elseif ($code === '1') {
+                    $out .= '<span style="font-weight:bold">'; $depth++;
+                } elseif ($code === '2') {
+                    $out .= '<span style="opacity:0.5">'; $depth++;
+                } elseif ($code === '3') {
+                    $out .= '<span style="font-style:italic">'; $depth++;
+                } elseif (isset($fg[$code])) {
+                    if ($fg[$code] !== null) { $out .= '<span style="color:' . $fg[$code] . '">'; $depth++; }
+                }
+            }
+        }
+    }
+    return $out . str_repeat('</span>', $depth);
+}
+
+$kp_log_lines = '';
+if (file_exists($kp_LOGFILE)) {
+    $kp_log_lines = kp_ansi2html(implode('', array_slice(file($kp_LOGFILE), -80)));
+}
+
+// Helper: get current value or default, and whether it's explicitly enabled (uncommented)
+function kp_val(array $cv, string $key, string $default): string {
+    return isset($cv[$key]) ? $cv[$key] : $default;
+}
+function kp_enabled(array $cv, string $key): bool {
+    return isset($cv[$key]);
+}
+// Strip surrounding quotes from a TOML string value
+function kp_unquote(string $v): string {
+    if (strlen($v) >= 2 && $v[0] === '"' && $v[-1] === '"') return substr($v, 1, -1);
+    return $v;
+}
+// Strip TOML array brackets and return comma-separated values
+function kp_unarray(string $v): string {
+    $v = trim($v);
+    if ($v === '[]') return '';
+    $v = preg_replace('/^\[|\]$/', '', $v);
+    // Remove quotes from each element
+    $parts = preg_split('/\s*,\s*/', trim($v));
+    return implode(', ', array_map(function($p) { return trim($p, ' "\''); }, array_filter($parts, 'strlen')));
+}
+// Bool value from TOML
+function kp_bool(array $cv, string $key, bool $default): bool {
+    if (!isset($cv[$key])) return $default;
+    return strtolower(trim($cv[$key])) === 'true';
+}
+?>
+
+<style>
+.kp-grid { display:grid; grid-template-columns:220px 1fr; gap:6px 14px; align-items:start; margin-bottom:6px; }
+.kp-grid label { display:flex; align-items:flex-start; gap:6px; padding-top:4px; font-size:0.9em; }
+.kp-grid input[type=text], .kp-grid select, .kp-grid textarea { width:100%; box-sizing:border-box; font-size:0.9em; }
+.kp-grid textarea { font-family:monospace; resize:vertical; }
+.kp-grid .kp-desc { font-size:0.78em; color:#aaa; margin:0 0 2px; }
+.kp-section-header { margin:18px 0 6px; font-weight:bold; font-size:0.95em; text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid #444; padding-bottom:3px; }
+.kp-row { display:contents; }
+.kp-row.kp-disabled label, .kp-row.kp-disabled input, .kp-row.kp-disabled select, .kp-row.kp-disabled textarea { opacity:0.45; }
+</style>
+
+<script>
+var KP_API = '/plugins/komodo-periphery/api.php';
+function kpCsrf() { return (typeof csrf_token !== 'undefined') ? csrf_token : ''; }
+
+function kpCall(data, btn) {
+    var orig = btn ? btn.value : null;
+    if (btn) { btn.disabled = true; btn.value = 'Working\u2026'; }
+    var payload = Object.assign({}, data, {csrf_token: kpCsrf()});
+    fetch(KP_API, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:new URLSearchParams(payload)})
+    .then(function(r){return r.json();})
+    .then(function(j){
+        if (btn){btn.disabled=false;btn.value=orig;}
+        kpFlash(j.ok, j.msg||'');
+        if (j.ok) setTimeout(function(){location.reload();},700);
+    })
+    .catch(function(e){if(btn){btn.disabled=false;btn.value=orig;}kpFlash(false,'Request failed: '+e);});
+}
+
+function kpFlash(ok, msg) {
+    var el = document.getElementById('kp-flash');
+    if (!el) {
+        el = document.createElement('div'); el.id='kp-flash';
+        var first = document.querySelector('.kp-section');
+        if (first) first.parentNode.insertBefore(el,first);
+        else document.body.insertBefore(el,document.body.firstChild);
+    }
+    el.className='notice '+(ok?'notice-green':'notice-red');
+    el.innerHTML='<pre style="margin:0;white-space:pre-wrap">'+String(msg).replace(/</g,'&lt;')+'</pre>';
+    el.scrollIntoView({behavior:'smooth'});
+}
+
+function kpInstall(tagInputId, btn) {
+    var tag = document.getElementById(tagInputId).value.trim();
+    if (!tag){kpFlash(false,'Enter a version tag.');return;}
+    kpCall({action:'install',tag:tag,csrf_token:kpCsrf()}, btn);
+}
+
+function kpLoadReleases(btn) {
+    var orig=btn.value; btn.disabled=true; btn.value='Loading\u2026';
+    fetch(KP_API+'?action=releases')
+    .then(function(r){return r.json();})
+    .then(function(j){
+        btn.disabled=false; btn.value=orig;
+        if (!j.ok||!j.tags||!j.tags.length){kpFlash(false,j.msg||'Could not fetch releases.');return;}
+        var tbody=document.getElementById('kp-rel-body');
+        tbody.innerHTML=j.tags.map(function(t,i){
+            return '<tr><td>'+t+(i===0?' <em>(latest)</em>':'')+
+                   '</td><td><input type="button" value="Install" onclick="document.getElementById(\'kp-tag\').value=\''+t+'\';kpInstall(\'kp-tag\',this)"></td></tr>';
+        }).join('');
+        document.getElementById('kp-rel-list').style.display='';
+    })
+    .catch(function(e){btn.disabled=false;btn.value=orig;kpFlash(false,'Failed: '+e);});
+}
+
+function kpCheckUpdates(btn) {
+    var orig=btn.value; btn.disabled=true; btn.value='Loading\u2026';
+    fetch(KP_API+'?action=releases')
+    .then(function(r){return r.json();})
+    .then(function(j){
+        btn.disabled=false; btn.value=orig;
+        if (!j.ok||!j.tags||!j.tags.length){kpFlash(false,j.msg||'Could not fetch releases.');return;}
+        var inst=document.getElementById('kp-inst-ver').textContent.trim();
+        var sel=document.getElementById('kp-ver-sel');
+        sel.innerHTML=j.tags.map(function(t,i){
+            return '<option value="'+t+'"'+(t===inst?' selected':'')+'>'+t+(i===0?' (latest)':'')+' </option>';
+        }).join('');
+        document.getElementById('kp-ver-row').style.display='';
+        if(j.tags[0]!==inst) kpFlash(false,'Update available: '+j.tags[0]+' \u2014 installed: '+inst);
+        else kpFlash(true,'Up to date ('+inst+')');
+    })
+    .catch(function(e){btn.disabled=false;btn.value=orig;kpFlash(false,'Failed: '+e);});
+}
+
+// Toggle a config row enabled/disabled when checkbox changes
+function kpToggleRow(cb, rowId) {
+    var row = document.getElementById(rowId);
+    if (!row) return;
+    if (cb.checked) { row.classList.remove('kp-disabled'); row.querySelectorAll('input,select,textarea').forEach(function(el){el.disabled=false;}); }
+    else            { row.classList.add('kp-disabled');    row.querySelectorAll('input,select,textarea').forEach(function(el){el.disabled=true;}); }
+}
+
+// Serialise the config form to TOML and submit
+function kpSaveConfig() {
+    var lines = [];
+    // Collect all enabled fields
+    document.querySelectorAll('.kp-field[data-key]').forEach(function(el) {
+        if (el.disabled) return; // unchecked/disabled
+        var key = el.getAttribute('data-key');
+        var type = el.getAttribute('data-type') || 'string';
+        var val = el.value.trim();
+        if (type === 'bool') {
+            lines.push(key + ' = ' + (el.value === 'true' ? 'true' : 'false'));
+        } else if (type === 'int') {
+            if (val !== '') lines.push(key + ' = ' + parseInt(val, 10));
+        } else if (type === 'array') {
+            // Comma-separated list -> TOML array of quoted strings
+            if (val === '') { lines.push(key + ' = []'); }
+            else {
+                var parts = val.split(',').map(function(s){return '"'+s.trim().replace(/"/g,'\\"')+'"';}).filter(Boolean);
+                lines.push(key + ' = [' + parts.join(', ') + ']');
+            }
+        } else {
+            // string
+            lines.push(key + ' = "' + val.replace(/\\/g,'\\\\').replace(/"/g,'\\"') + '"');
+        }
+    });
+    // Append raw tail sections (git_provider, docker_registry, secrets etc.)
+    var tail = document.getElementById('kp-tail').value.trim();
+    if (tail) lines.push('', tail);
+    kpCall({action:'save', config: lines.join("\n")}, document.getElementById('kp-save-btn'));
+}
+</script>
+
+<?php if ($kp_state === 'NOT_INSTALLED'): ?>
+
+<div class="title kp-section"><span class="left">Install Komodo Periphery</span></div>
+<div class="pluginUpdate">
+  <p>The Periphery binary has not been downloaded yet. Enter a release tag and click <strong>Install</strong>.</p>
+  <p>
+    Version tag:&nbsp;<input type="text" id="kp-tag" style="width:12em" placeholder="e.g. v2.2.0">
+    &nbsp;<input type="button" value="Install" onclick="kpInstall('kp-tag', this)">
+    &nbsp;<input type="button" value="Load release list" onclick="kpLoadReleases(this)">
+  </p>
+  <p style="font-size:0.85em">
+    Find release tags at <a href="https://github.com/moghtech/komodo/releases" target="_blank">github.com/moghtech/komodo/releases</a>.
+  </p>
+  <div id="kp-rel-list" style="display:none">
+    <table class="tablesorter" style="width:auto">
+      <thead><tr><th>Version</th><th></th></tr></thead>
+      <tbody id="kp-rel-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<?php elseif ($kp_state === 'NOT_PAIRED'): ?>
+
+<div class="title kp-section"><span class="left">Pair with Komodo Core</span></div>
+<div class="pluginUpdate">
+  <p>Periphery <strong><?= kp_h($kp_inst_ver) ?></strong> is installed but not yet paired with a Core.</p>
+  <ol>
+    <li>Click <strong>Start</strong> below &mdash; Periphery generates a Noise key on first run.</li>
+    <li>In Komodo Core go to <strong>Settings &rarr; Servers &rarr; Add Server</strong> and enter <code>&lt;this-host-ip&gt;:8120</code>.</li>
+    <li>Copy the Core public key from <strong>Settings &rarr; Keys</strong> into <code>core_public_keys</code> in the config editor below, then <strong>Save &amp; Restart</strong>.</li>
+  </ol>
+</div>
+
+<?php endif; ?>
+
+<?php if ($kp_state !== 'NOT_INSTALLED'): ?>
+
+<div class="title kp-section"><span class="left">Service</span></div>
+<div class="pluginUpdate" style="margin-bottom:20px">
+  <p>
+    Status: <strong><?= $kp_status['running'] ? 'Running' : 'Stopped' ?></strong><?php if ($kp_status['pid']): ?> (PID <?= kp_h((string)$kp_status['pid']) ?>)<?php endif; ?>
+    <?php if ($kp_state === 'READY'): ?> &mdash; Version: <strong id="kp-inst-ver"><?= kp_h($kp_inst_ver) ?></strong><?php endif; ?>
+  </p>
+  <?php if ($kp_state === 'READY'): ?>
+  <p><input type="button" value="Check for updates" onclick="kpCheckUpdates(this)"></p>
+  <p id="kp-ver-row" style="display:none">
+    Switch to:&nbsp;<select id="kp-ver-sel"></select>
+    &nbsp;<input type="button" value="Install selected" onclick="kpCall({action:'install',tag:document.getElementById('kp-ver-sel').value},this)">
+  </p>
+  <?php endif; ?>
+  <input type="button" value="Start"   onclick="kpCall({action:'start'},   this)">&nbsp;
+  <input type="button" value="Stop"    onclick="kpCall({action:'stop'},    this)">&nbsp;
+  <input type="button" value="Restart" onclick="kpCall({action:'restart'}, this)">
+</div>
+
+<!-- ======================= CONFIG EDITOR ======================= -->
+<div class="title kp-section"><span class="left">Configuration</span></div>
+<div class="pluginUpdate">
+  <p style="margin-top:0;font-size:0.85em">
+    Check a field to enable it (write to config). Uncheck to comment it out.
+    Click <strong>Save &amp; Restart</strong> to apply.
+  </p>
+
+<?php
+// Helper macros for rendering rows
+// Each field: [key, type, label, default, description, options(for select)]
+// Types: string | int | bool | array | password | path | select
+
+function kp_row(array $cv, string $key, string $type, string $label, string $default_val, string $desc, array $opts = []): void {
+    $enabled  = kp_enabled($cv, $key);
+    $raw_val  = kp_val($cv, $key, $default_val);
+    $row_id   = 'kp-row-' . str_replace(['.','_'], '-', $key);
+    $field_id = 'kp-f-' . str_replace(['.','_'], '-', $key);
+    $disabled = $enabled ? '' : 'disabled';
+    $checked  = $enabled ? 'checked' : '';
+    $row_cls  = $enabled ? 'kp-row' : 'kp-row kp-disabled';
+
+    // Decode value
+    if ($type === 'bool') {
+        $display_val = kp_bool($cv, $key, strtolower($default_val) === 'true') ? 'true' : 'false';
+    } elseif ($type === 'array') {
+        $display_val = $enabled ? kp_unarray($raw_val) : kp_unarray($default_val);
+    } else {
+        $display_val = $enabled ? kp_unquote($raw_val) : kp_unquote($default_val);
+    }
+
+    echo '<div id="' . kp_h($row_id) . '" class="' . kp_h($row_cls) . '">';
+    echo '<label>';
+    echo '<input type="checkbox" ' . $checked . ' onchange="kpToggleRow(this,\'' . kp_h($row_id) . '\')">';
+    echo '&nbsp;' . kp_h($label);
+    echo '</label>';
+    echo '<div>';
+    if ($desc) echo '<div class="kp-desc">' . kp_h($desc) . '</div>';
+
+    if ($type === 'bool') {
+        echo '<select id="' . kp_h($field_id) . '" class="kp-field" data-key="' . kp_h($key) . '" data-type="bool" ' . $disabled . '>';
+        echo '<option value="true"'  . ($display_val === 'true'  ? ' selected' : '') . '>true</option>';
+        echo '<option value="false"' . ($display_val === 'false' ? ' selected' : '') . '>false</option>';
+        echo '</select>';
+    } elseif ($type === 'select') {
+        echo '<select id="' . kp_h($field_id) . '" class="kp-field" data-key="' . kp_h($key) . '" data-type="select" ' . $disabled . '>';
+        foreach ($opts as $o) {
+            echo '<option value="' . kp_h($o) . '"' . ($display_val === $o ? ' selected' : '') . '>' . kp_h($o) . '</option>';
+        }
+        echo '</select>';
+    } elseif ($type === 'array') {
+        echo '<input type="text" id="' . kp_h($field_id) . '" class="kp-field" data-key="' . kp_h($key) . '" data-type="array" value="' . kp_h($display_val) . '" placeholder="comma-separated, e.g. /mnt/user, /mnt/cache" ' . $disabled . '>';
+    } elseif ($type === 'int') {
+        echo '<input type="number" id="' . kp_h($field_id) . '" class="kp-field" data-key="' . kp_h($key) . '" data-type="int" value="' . kp_h($display_val) . '" style="width:8em" ' . $disabled . '>';
+    } else {
+        // string / path / password
+        $itype = ($type === 'password') ? 'password' : 'text';
+        echo '<input type="' . $itype . '" id="' . kp_h($field_id) . '" class="kp-field" data-key="' . kp_h($key) . '" data-type="string" value="' . kp_h($display_val) . '" ' . $disabled . '>';
+    }
+
+    echo '</div></div>';
+}
+?>
+
+<div class="kp-grid">
+
+<div class="kp-section-header" style="grid-column:1/-1">General</div>
+<?php kp_row($kp_cv, 'root_directory',       'path',   'Root directory',             '/etc/komodo',    'Base directory for repos, stacks, builds.'); ?>
+<?php kp_row($kp_cv, 'repo_dir',             'path',   'Repo directory',              '${root_directory}/repos',  'Override repo storage path.'); ?>
+<?php kp_row($kp_cv, 'stack_dir',            'path',   'Stack directory',             '${root_directory}/stacks', 'Override stack storage path.'); ?>
+<?php kp_row($kp_cv, 'build_dir',            'path',   'Build directory',             '${root_directory}/builds', 'Override build storage path.'); ?>
+<?php kp_row($kp_cv, 'default_terminal_command', 'string', 'Default terminal shell',  'bash',           'Shell used for remote terminal sessions (bash, zsh…).'); ?>
+<?php kp_row($kp_cv, 'disable_terminals',    'bool',   'Disable terminals',           'false',          'Block remote shell access via Periphery.'); ?>
+<?php kp_row($kp_cv, 'disable_container_terminals', 'bool', 'Disable container exec', 'false',         'Block docker exec / attach via Periphery.'); ?>
+<?php kp_row($kp_cv, 'stats_polling_rate',   'select', 'Stats polling rate',          '5-sec',          'How often host CPU/mem stats are polled.',
+    ['1-sec','2-sec','5-sec','10-sec','30-sec','1-min','5-min','15-min','30-min','1-hr']); ?>
+<?php kp_row($kp_cv, 'container_stats_polling_rate', 'select', 'Container stats rate', '30-sec',        'How often container stats are polled.',
+    ['1-sec','2-sec','5-sec','10-sec','30-sec','1-min','5-min','15-min','30-min','1-hr']); ?>
+<?php kp_row($kp_cv, 'legacy_compose_cli',   'bool',   'Legacy compose CLI',          'false',          'Use `docker-compose` instead of `docker compose`.'); ?>
+<?php kp_row($kp_cv, 'include_disk_mounts',  'array',  'Include disk mounts',         '[]',             'Only report these mount paths in disk stats. Leave empty for all.'); ?>
+<?php kp_row($kp_cv, 'exclude_disk_mounts',  'array',  'Exclude disk mounts',         '[]',             'Exclude these mount paths from disk stats.'); ?>
+<?php kp_row($kp_cv, 'pretty_startup_config','bool',   'Pretty startup config log',   'false',          'Print startup config in multi-line human-readable format.'); ?>
+
+<div class="kp-section-header" style="grid-column:1/-1">Authentication</div>
+<?php kp_row($kp_cv, 'private_key',          'string', 'Private key',  'file:/etc/komodo/keys/periphery.key', 'Path to Noise private key file (file:/path) or key literal.'); ?>
+<?php kp_row($kp_cv, 'core_public_keys',     'string', 'Core public keys', '',   'Comma-separated public keys of trusted Core(s). Required for inbound auth.'); ?>
+
+<div class="kp-section-header" style="grid-column:1/-1">Outbound Mode (Periphery → Core)</div>
+<?php kp_row($kp_cv, 'core_address',         'string', 'Core address',  '',    'Hostname/IP of Komodo Core. Enables outbound mode.'); ?>
+<?php kp_row($kp_cv, 'connect_as',           'string', 'Connect as',    '',    'Server name or ID to connect as. Must already exist in Core.'); ?>
+<?php kp_row($kp_cv, 'onboarding_key',       'string', 'Onboarding key','',    'One-time key from Core Server settings for auto-registration.'); ?>
+
+<div class="kp-section-header" style="grid-column:1/-1">Inbound Mode (Core → Periphery)</div>
+<?php kp_row($kp_cv, 'server_enabled',       'bool',   'Server enabled',  'true',    'Enable inbound server. Auto-disabled when core_address is set.'); ?>
+<?php kp_row($kp_cv, 'port',                 'int',    'Port',            '8120',    'TCP port Periphery listens on.'); ?>
+<?php kp_row($kp_cv, 'bind_ip',              'string', 'Bind IP',         '[::]',    'IP to bind to. [::] = all IPv4+IPv6.'); ?>
+<?php kp_row($kp_cv, 'allowed_ips',          'array',  'Allowed IPs',     '[]',      'Whitelist of IPs/subnets allowed to connect. Empty = allow all.'); ?>
+<?php kp_row($kp_cv, 'ssl_enabled',          'bool',   'SSL enabled',     'true',    'Enable HTTPS. Self-signed cert auto-generated if files not found.'); ?>
+<?php kp_row($kp_cv, 'ssl_key_file',         'path',   'SSL key file',    '${root_directory}/ssl/key.pem',  'Path to SSL private key.'); ?>
+<?php kp_row($kp_cv, 'ssl_cert_file',        'path',   'SSL cert file',   '${root_directory}/ssl/cert.pem', 'Path to SSL certificate.'); ?>
+
+<div class="kp-section-header" style="grid-column:1/-1">Logging</div>
+<?php kp_row($kp_cv, 'logging.level',        'select', 'Log level',       'info',    'Logging verbosity.',
+    ['off','error','warn','info','debug','trace']); ?>
+<?php kp_row($kp_cv, 'logging.stdio',        'select', 'Stdio format',    'standard','Format for stdout/stderr.',
+    ['standard','json','none']); ?>
+<?php kp_row($kp_cv, 'logging.pretty',       'bool',   'Pretty logs',     'false',   'Human-readable multi-line log output.'); ?>
+<?php kp_row($kp_cv, 'logging.otlp_endpoint','string', 'OTLP endpoint',   '',        'OpenTelemetry collector endpoint, e.g. http://localhost:4317.'); ?>
+<?php kp_row($kp_cv, 'logging.opentelemetry_service_name', 'string', 'OTel service name', 'Periphery', 'Service name attached to telemetry.'); ?>
+<?php kp_row($kp_cv, 'logging.opentelemetry_scope_name',   'string', 'OTel scope name',   'Komodo',    'Scope name attached to telemetry.'); ?>
+
+</div><!-- .kp-grid -->
+
+<div class="kp-section-header" style="margin-top:18px">Git Providers / Docker Registries / Secrets</div>
+<p style="font-size:0.85em;margin:4px 0 6px">
+  These sections use TOML array-of-tables syntax and are kept as raw text. Edit directly.
+  Leave blank if unused.
+</p>
+<textarea id="kp-tail" rows="12" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.82em;resize:vertical"><?= kp_h($kp_tail) ?></textarea>
+
+<br><br>
+<input type="button" id="kp-save-btn" value="Save &amp; Restart" onclick="kpSaveConfig()">
+<input type="button" value="Save only" onclick="(function(){document.getElementById('kp-save-btn').setAttribute('data-no-restart','1');kpSaveConfig();})()">
+
+<script>
+// Patch kpSaveConfig to support Save only (no restart)
+(function(){
+    var origSave = kpSaveConfig;
+    kpSaveConfig = function() {
+        var lines = [];
+        document.querySelectorAll('.kp-field[data-key]').forEach(function(el) {
+            if (el.disabled) return;
+            var key = el.getAttribute('data-key');
+            var type = el.getAttribute('data-type') || 'string';
+            var val = el.value.trim();
+            if (type === 'bool') {
+                lines.push(key + ' = ' + (el.value === 'true' ? 'true' : 'false'));
+            } else if (type === 'int') {
+                if (val !== '') lines.push(key + ' = ' + parseInt(val, 10));
+            } else if (type === 'array') {
+                if (val === '') { lines.push(key + ' = []'); }
+                else {
+                    var parts = val.split(',').map(function(s){return '"'+s.trim().replace(/"/g,'\\"')+'"';}).filter(Boolean);
+                    lines.push(key + ' = [' + parts.join(', ') + ']');
+                }
+            } else {
+                lines.push(key + ' = "' + val.replace(/\\/g,'\\\\').replace(/"/g,'\\"') + '"');
+            }
+        });
+        var tail = document.getElementById('kp-tail').value.trim();
+        if (tail) lines.push('', tail);
+        var btn = document.getElementById('kp-save-btn');
+        var noRestart = btn.getAttribute('data-no-restart') === '1';
+        btn.removeAttribute('data-no-restart');
+        var saveBtn = noRestart ? document.querySelector('input[value="Save only"]') : btn;
+        kpCall({action: noRestart ? 'save' : 'save_restart', config: lines.join("\n")}, saveBtn);
+    };
+})();
+</script>
+
+</div><!-- .pluginUpdate -->
+
+<?php if ($kp_state === 'READY'): ?>
+<div class="title kp-section"><span class="left">Log (last 80 lines)</span></div>
+<div class="pluginUpdate">
+  <?php if ($kp_log_lines): ?>
+    <pre id="kp-logbox" style="max-height:400px;overflow-y:auto;font-size:0.8em;white-space:pre-wrap;background:#1e2127;color:#abb2bf;padding:10px;border-radius:4px;line-height:1.5"><?= $kp_log_lines ?></pre>
+    <script>var lb=document.getElementById('kp-logbox');lb.scrollTop=lb.scrollHeight;</script>
+  <?php else: ?>
+    <p>No log file yet (<code><?= kp_h($kp_LOGFILE) ?></code>).</p>
+  <?php endif; ?>
+</div>
+<?php endif; ?>
+
+<?php endif; ?>

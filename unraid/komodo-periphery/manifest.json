@@ -1,0 +1,21 @@
+{
+  "template": "src/komodo-periphery.plg.template",
+  "output": "komodo-periphery.plg",
+  "substitutions": {
+    "__CONFIG_TOML__": "src/periphery.config.toml",
+    "__INSTALL_SH__": "src/install.sh",
+    "__REMOVE_SH__": "src/remove.sh"
+  },
+  "txz": {
+    "name": "komodo-periphery",
+    "placeholder": "__TXZ_B64__",
+    "slack_desc": "komodo-periphery: Komodo Periphery\nkomodo-periphery: Native UnRaid daemon for Komodo infrastructure management.\n",
+    "files": [
+      { "src": "rc.komodo-periphery",   "dest": "boot/config/plugins/komodo-periphery/rc.komodo-periphery",                      "mode": "0755" },
+      { "src": "api.php",               "dest": "usr/local/emhttp/plugins/komodo-periphery/api.php",                              "mode": "0644" },
+      { "src": "komodo-periphery.page", "dest": "usr/local/emhttp/plugins/komodo-periphery/komodo-periphery.page",                "mode": "0644" },
+      { "src": "event-started",         "dest": "usr/local/emhttp/plugins/komodo-periphery/event/started",                        "mode": "0755" },
+      { "src": "event-stopping-svcs",   "dest": "usr/local/emhttp/plugins/komodo-periphery/event/stopping_svcs",                  "mode": "0755" }
+    ]
+  }
+}

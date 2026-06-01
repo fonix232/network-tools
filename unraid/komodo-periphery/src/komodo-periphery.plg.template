@@ -1,0 +1,59 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name        "komodo-periphery">
+  <!ENTITY version     "__VERSION__">
+  <!ENTITY plugin_dir  "/boot/config/plugins/komodo-periphery">
+]>
+<PLUGIN name="&name;" version="&version;" min="6.10.0">
+
+<CHANGES>
+### __VERSION__
+- Built by GHA from tools/unraid/komodo-periphery/src/
+- Native UnRaid daemon (no Docker required)
+- Noise private/public key authentication
+- Version selection and updates via the web UI
+</CHANGES>
+
+<!-- Runtime package: rc script, web UI, event hooks (embedded txz) -->
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+TXZ=/tmp/komodo-periphery-__VERSION__-x86_64-1.txz
+base64 -d <<'__TXZ_EOF__' > "$TXZ"
+__TXZ_B64__
+__TXZ_EOF__
+removepkg komodo-periphery 2>/dev/null || true
+installpkg "$TXZ"
+rm -f "$TXZ"
+]]>
+</INLINE>
+</FILE>
+
+<!-- Default config — seeded to /etc/komodo/ on first run, restored from flash on every boot -->
+<FILE Name="&plugin_dir;/periphery.config.toml" Mode="0644">
+<INLINE>
+<![CDATA[
+__CONFIG_TOML__
+]]>
+</INLINE>
+</FILE>
+
+<!-- Install / upgrade -->
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+__INSTALL_SH__
+]]>
+</INLINE>
+</FILE>
+
+<!-- Uninstall -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+__REMOVE_SH__
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>

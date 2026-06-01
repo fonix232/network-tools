@@ -1,0 +1,12 @@
+#!/bin/bash
+# gnupg2 plugin — shutdown hook
+# Backup GPG keyring from RAM to flash.
+
+FLASH_GPG="/boot/config/gnupg"
+
+if [ -d /root/.gnupg ]; then
+    mkdir -p "$FLASH_GPG"
+    rsync -a --delete --exclude='S.*' --exclude='*.lock' --exclude='.#lk*' \
+        /root/.gnupg/ "$FLASH_GPG/"
+    echo "gnupg2: backed up keyring to flash"
+fi

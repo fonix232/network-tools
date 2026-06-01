@@ -1,0 +1,49 @@
+## Komodo Periphery — UnRaid
+## Full reference: https://github.com/moghtech/komodo/blob/main/config/periphery.config.toml
+##
+## Edit this file via the UnRaid web UI (Plugins -> Komodo Periphery) or directly
+## at /boot/config/komodo-periphery/periphery.config.toml on flash.
+## Changes take effect after restarting the service.
+
+###########
+# GENERAL #
+###########
+
+root_directory = "/etc/komodo"
+
+########
+# AUTH #
+########
+
+## Noise private key — auto-generated on first start if the file does not exist.
+private_key = "file:/etc/komodo/keys/periphery.key"
+
+## Add the Komodo Core public key here after the first connection attempt.
+## Find it in Core -> Settings -> Keys, or in the Core startup logs.
+# core_public_keys = "MCow..."
+
+################
+# INBOUND MODE #
+################
+
+port = 8120
+bind_ip = "[::]"
+
+## Restrict inbound connections to Komodo Core's IP only (recommended).
+# allowed_ips = ["192.0.2.1"]
+
+ssl_enabled = true
+
+###########
+# LOGGING #
+###########
+
+logging.level = "info"
+logging.stdio = "standard"
+
+##########
+# DISKS  #
+##########
+
+## Only report these mount points in the disk view.
+include_disk_mounts = ["/mnt/user", "/boot"]

@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Generated build artifacts
+*.plg
+output/*.run
+
+# OS
+.DS_Store

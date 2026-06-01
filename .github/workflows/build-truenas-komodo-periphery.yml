@@ -1,0 +1,22 @@
+name: Build truenas/komodo-periphery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'truenas/komodo-periphery/**'
+      - 'truenas/common/**'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    with:
+      component_label: truenas/komodo-periphery
+      tag_prefix: truenas-komodo-periphery
+      build_working_directory: truenas/komodo-periphery
+      build_command: docker compose run --rm build
+      artifact_path: truenas/komodo-periphery/output/*.run
+      extra_release_notes: |
+        Artifacts are self-extracting .run installers for TrueNAS SCALE.
+    secrets: inherit

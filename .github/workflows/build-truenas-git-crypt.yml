@@ -1,0 +1,22 @@
+name: Build truenas/git-crypt
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'truenas/git-crypt/**'
+      - 'truenas/common/**'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    with:
+      component_label: truenas/git-crypt
+      tag_prefix: truenas-git-crypt
+      build_working_directory: truenas/git-crypt
+      build_command: docker compose run --rm build
+      artifact_path: truenas/git-crypt/output/*.run
+      extra_release_notes: |
+        Artifacts are self-extracting .run installers for TrueNAS SCALE.
+    secrets: inherit

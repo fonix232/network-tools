@@ -1,0 +1,15 @@
+#!/bin/bash
+# gnupg2 plugin — array start hook
+# Restore GPG keyring from flash to RAM.
+
+FLASH_GPG="/boot/config/gnupg"
+
+if [ -d "$FLASH_GPG" ]; then
+    mkdir -p /root/.gnupg
+    chmod 700 /root/.gnupg
+    rsync -a --exclude='S.*' --exclude='*.lock' --exclude='.#lk*' \
+        "$FLASH_GPG/" /root/.gnupg/
+    echo "gnupg2: restored keyring from flash"
+else
+    echo "gnupg2: no keyring backup found on flash"
+fi

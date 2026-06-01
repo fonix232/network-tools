@@ -1,0 +1,23 @@
+name: Build unraid/gnupg2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'unraid/gnupg2/src/**'
+      - 'unraid/gnupg2/manifest.json'
+      - 'unraid/common/**'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    with:
+      component_label: unraid/gnupg2
+      tag_prefix: unraid-gnupg2
+      build_working_directory: unraid/gnupg2
+      build_command: python3 ../common/assemble.py --version "$VERSION"
+      artifact_path: unraid/gnupg2/gnupg2.plg
+      extra_release_notes: |
+        Install via Unraid Plugins > Install Plugin using the released .plg URL from this release.
+    secrets: inherit

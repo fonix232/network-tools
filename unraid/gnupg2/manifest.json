@@ -1,0 +1,12 @@
+{
+  "template": "src/gnupg2.plg.template",
+  "output": "gnupg2.plg",
+  "substitutions": {
+    "__EVENT_STARTED__": "src/event-started",
+    "__EVENT_STOPPING_SVCS__": "src/event-stopping-svcs",
+    "__WEB_PAGE__": "src/gnupg2.page",
+    "__API_PHP__": "src/api.php",
+    "__INSTALL_SH__": "src/install.sh",
+    "__REMOVE_SH__": "src/remove.sh"
+  }
+}

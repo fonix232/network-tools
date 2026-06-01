@@ -1,0 +1,11 @@
+#!/bin/bash
+PLUGIN_DIR="/boot/config/plugins/git-crypt"
+CACHED="$PLUGIN_DIR/git-crypt"
+INSTALL_PATH="/usr/local/bin/git-crypt"
+
+if [ -f "$CACHED" ]; then
+    install -m 0755 "$CACHED" "$INSTALL_PATH"
+    echo "git-crypt: installed from flash to $INSTALL_PATH"
+else
+    echo "git-crypt: cached binary not found at $CACHED — reinstall the plugin to download it"
+fi

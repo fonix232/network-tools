@@ -1,0 +1,11 @@
+{
+  "template": "src/git-crypt.plg.template",
+  "output": "git-crypt.plg",
+  "substitutions": {
+    "__EVENT_STARTED__": "src/event-started",
+    "__WEB_PAGE__": "src/git-crypt.page",
+    "__API_PHP__": "src/api.php",
+    "__INSTALL_SH__": "src/install.sh",
+    "__REMOVE_SH__": "src/remove.sh"
+  }
+}

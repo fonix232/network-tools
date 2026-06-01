@@ -1,0 +1,21 @@
+# Builds self-extracting sysext installers for recent git-crypt releases.
+#
+#   docker compose run --rm build
+#
+# Override defaults:
+#   RELEASE_COUNT=3 GITCRYPT_ARCH=x86_64 docker compose run --rm build
+
+services:
+  build:
+    build:
+      context: ../..
+      dockerfile: truenas/common/Dockerfile.builder
+    platform: linux/amd64
+    volumes:
+      - ../..:/workspace:ro
+      - ./output:/output
+    environment:
+      RELEASE_COUNT: ${RELEASE_COUNT:-6}
+      GITCRYPT_ARCH: ${GITCRYPT_ARCH:-x86_64}
+      PLUGIN_BUILD_SCRIPT: truenas/git-crypt/src/build.sh
+      INSTALL_TEMPLATE_PATH: /workspace/truenas/git-crypt/src/install.sh

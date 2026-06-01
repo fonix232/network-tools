@@ -1,0 +1,64 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name       "gnupg2">
+  <!ENTITY version    "__VERSION__">
+  <!ENTITY plugin_dir "/boot/config/plugins/gnupg2">
+]>
+<PLUGIN name="&name;" version="&version;" min="6.10.0">
+
+<CHANGES>
+### __VERSION__
+- Downloads gnupg2 + dependencies from Slackware mirror to /boot/extra
+- Web UI for package updates and GPG key management
+- Automatic keyring backup/restore on shutdown/boot
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/event/started" Mode="0755">
+<INLINE>
+<![CDATA[
+__EVENT_STARTED__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/event/stopping_svcs" Mode="0755">
+<INLINE>
+<![CDATA[
+__EVENT_STOPPING_SVCS__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/gnupg2.page" Mode="0644">
+<INLINE>
+<![CDATA[
+__WEB_PAGE__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/api.php" Mode="0644">
+<INLINE>
+<![CDATA[
+__API_PHP__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+__INSTALL_SH__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+__REMOVE_SH__
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>

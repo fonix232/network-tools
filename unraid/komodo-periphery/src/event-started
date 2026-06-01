@@ -1,0 +1,4 @@
+#!/bin/bash
+# Called by emhttp when the array starts.
+# /boot is FAT32 — always invoke via 'sh', never rely on execute bit.
+sh /boot/config/plugins/komodo-periphery/rc.komodo-periphery start
