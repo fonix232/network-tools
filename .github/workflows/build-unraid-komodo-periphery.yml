@@ -7,6 +7,7 @@ on:
       - 'unraid/komodo-periphery/src/**'
       - 'unraid/komodo-periphery/manifest.json'
       - 'unraid/common/**'
+      - '.github/workflows/build-unraid-komodo-periphery.yml'
   workflow_dispatch:
 
 jobs:

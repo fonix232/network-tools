@@ -7,6 +7,7 @@ on:
       - 'unraid/gnupg2/src/**'
       - 'unraid/gnupg2/manifest.json'
       - 'unraid/common/**'
+      - '.github/workflows/build-unraid-gnupg2.yml'
   workflow_dispatch:
 
 jobs:
