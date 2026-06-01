@@ -12,6 +12,8 @@ on:
 jobs:
   call-reusable:
     uses: ./.github/workflows/reusable-build-release.yml
+    permissions:
+      contents: write
     with:
       component_label: unraid/gnupg2
       tag_prefix: unraid-gnupg2

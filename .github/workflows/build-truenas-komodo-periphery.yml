@@ -11,6 +11,8 @@ on:
 jobs:
   call-reusable:
     uses: ./.github/workflows/reusable-build-release.yml
+    permissions:
+      contents: write
     with:
       component_label: truenas/komodo-periphery
       tag_prefix: truenas-komodo-periphery

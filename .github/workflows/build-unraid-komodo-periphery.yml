@@ -12,6 +12,8 @@ on:
 jobs:
   call-reusable:
     uses: ./.github/workflows/reusable-build-release.yml
+    permissions:
+      contents: write
     with:
       component_label: unraid/komodo-periphery
       tag_prefix: unraid-komodo-periphery
