@@ -8,6 +8,7 @@ on:
       - 'unraid/git-crypt/manifest.json'
       - 'unraid/common/**'
       - '.github/workflows/build-unraid-git-crypt.yml'
+      - '.github/workflows/reusable-build-release.yml'
   workflow_dispatch:
 
 jobs:

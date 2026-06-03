@@ -48,7 +48,7 @@ while IFS= read -r entry; do
   if [[ "$(echo "${entry}" | jq -r '.base_version')" == "" ]]; then
     makefile=$(curl -fsSL \
       "https://raw.githubusercontent.com/truenas/linux/${sha}/Makefile" \
-      2>/dev/null | head -10)
+      2>/dev/null | head -10) || true
     ver=$(echo "${makefile}" | awk '/^VERSION[[:space:]]*=/{print $3}')
     pl=$(echo  "${makefile}" | awk '/^PATCHLEVEL[[:space:]]*=/{print $3}')
     sl=$(echo  "${makefile}" | awk '/^SUBLEVEL[[:space:]]*=/{print $3}')

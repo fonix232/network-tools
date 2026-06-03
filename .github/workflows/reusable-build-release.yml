@@ -65,9 +65,11 @@ jobs:
 
       - name: Generate release notes from triggering commit
         id: notes
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
-          MSG='${{ github.event.head_commit.message }}'
+          MSG="$COMMIT_MSG"
           if [ -z "$MSG" ]; then
             MSG="$(git log -1 --pretty=%B)"
           fi

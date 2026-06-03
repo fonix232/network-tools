@@ -7,6 +7,7 @@ on:
       - 'truenas/komodo-periphery/**'
       - 'truenas/common/**'
       - '.github/workflows/build-truenas-komodo-periphery.yml'
+      - '.github/workflows/reusable-build-release.yml'
   workflow_dispatch:
 
 jobs:
