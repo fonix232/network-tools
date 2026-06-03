@@ -46,14 +46,19 @@ for TAG in $TAGS; do
 
     # Build sysext tree
     reset_sysext_tree
-    mkdir -p /sysext/usr/lib/systemd/system
+    mkdir -p /sysext/usr/lib/systemd/system/multi-user.target.wants
 
     cp /tmp/periphery /sysext/usr/bin/periphery
 
     write_extension_release "komodo-periphery" "$SYSEXT_ARCH"
 
-    printf '[Unit]\nDescription=Komodo Periphery Agent\nDocumentation=https://komo.do\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart=/usr/bin/periphery --config-path /etc/komodo/periphery.config.toml\nRestart=on-failure\nRestartSec=5s\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=komodo-periphery\n\n[Install]\nWantedBy=multi-user.target\n' \
+    printf '[Unit]\nDescription=Komodo Periphery Agent\nDocumentation=https://komo.do\nAfter=network-online.target systemd-sysext.service\nWants=network-online.target\n\n[Service]\nExecStart=/usr/bin/periphery --config-path /etc/komodo/periphery.config.toml\nRestart=on-failure\nRestartSec=5s\nStandardOutput=journal\nStandardError=journal\nSyslogIdentifier=komodo-periphery\n\n[Install]\nWantedBy=multi-user.target\n' \
         > /sysext/usr/lib/systemd/system/komodo-periphery.service
+
+    # Static vendor-enablement symlink so the service starts after sysext activates
+    # (before multi-user.target) without relying on /etc symlinks from systemctl enable.
+    ln -sf ../komodo-periphery.service \
+        /sysext/usr/lib/systemd/system/multi-user.target.wants/komodo-periphery.service
 
     # Pack squashfs + assemble self-extracting installer
     pack_and_wrap_installer "komodo-periphery" "$OUT" "$INSTALL_TEMPLATE_PATH"
