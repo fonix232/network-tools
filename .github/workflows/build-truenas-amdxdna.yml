@@ -56,15 +56,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get linux-firmware HEAD commit
+      - name: Get drm-firmware HEAD commit
         id: head
         run: |
           fw_commit="$(git ls-remote \
-            https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git \
-            HEAD | cut -f1)"
-          echo "linux-firmware HEAD: ${fw_commit}"
-          echo "fw_commit=${fw_commit}"                   >> "$GITHUB_OUTPUT"
-          echo "fw_commit_short=${fw_commit:0:12}"        >> "$GITHUB_OUTPUT"
+            https://gitlab.com/kernel-firmware/drm-firmware.git \
+            refs/heads/amd-ipu-staging | cut -f1)"
+          echo "drm-firmware amd-ipu-staging HEAD: ${fw_commit}"
+          echo "fw_commit=${fw_commit}"            >> "$GITHUB_OUTPUT"
+          echo "fw_commit_short=${fw_commit:0:12}" >> "$GITHUB_OUTPUT"
 
       - name: Restore firmware sysext from cache
         id: cache
