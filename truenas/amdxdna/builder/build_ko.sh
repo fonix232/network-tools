@@ -27,15 +27,16 @@ set -euo pipefail
 drv_c="${DRIVER_SRC}/amdxdna_pci_drv.c"
 [[ -f "${drv_c}" ]] || { echo "ERROR: ${drv_c} not found" >&2; exit 1; }
 
-# Remove hardcoded MODULE_VERSION() — version is already advertised via
-# DRM drm_driver.major/minor at runtime; the hardcoded "0.1" would shadow it.
-sed -i '/^MODULE_VERSION(/d' "${drv_c}"
-
 # Extract MAJOR.MINOR version from source defines.
 xdna_major=$(grep -m1 'define[[:space:]]\+AMDXDNA_DRIVER_MAJOR' "${drv_c}" | grep -oP '\d+$')
 xdna_minor=$(grep -m1 'define[[:space:]]\+AMDXDNA_DRIVER_MINOR' "${drv_c}" | grep -oP '\d+$')
 xdna_modver="${xdna_major}.${xdna_minor}"
 echo "Driver version: ${xdna_modver} (kernel: ${KERNEL_VERSION})"
+
+# Rewrite MODULE_VERSION to match the actual DRM driver version. The upstream
+# source hardcodes "0.1" which XRT reads from /sys/module/amdxdna/version and
+# rejects as incompatible. Replace it with the version from the source defines.
+sed -i "s/MODULE_VERSION(\"[^\"]*\")/MODULE_VERSION(\"${xdna_modver}\")/" "${drv_c}"
 
 # Fix: amdxdna_sva_fini must be called before mmdrop(client->mm).
 # When FLM terminates dirty (SIGKILL / container stop), mm_users has already
