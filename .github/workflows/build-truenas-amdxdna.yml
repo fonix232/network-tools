@@ -315,7 +315,9 @@ jobs:
       # ── Read final version ────────────────────────────────────────────────
       - name: Read xdna version
         id: ver
-        run: echo "xdna_ver=$(cat out/version.txt)" >> "$GITHUB_OUTPUT"
+        run: |
+          base_ver=$(cat out/version.txt)
+          echo "xdna_ver=${base_ver}-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       # ── Upload artifacts ──────────────────────────────────────────────────
       - name: Upload amdxdna-override .run
@@ -333,24 +335,8 @@ jobs:
           retention-days: 30
 
       # ── GitHub Release (main branch pushes only) ──────────────────────────
-      - name: Check if release already exists
-        id: check-release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          if gh release view "v${{ steps.ver.outputs.xdna_ver }}" \
-              --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "exists=true"  >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-
       - name: Create GitHub Release
-        if: >
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main' &&
-          steps.check-release.outputs.exists == 'false'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.xdna_ver }}
