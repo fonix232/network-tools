@@ -23,7 +23,15 @@ setup() {
 }
 
 # Flush all of /etc/komodo back to flash for persistence across reboots.
+# Guard: only save if a config file exists in /etc/komodo. If periphery started
+# without finding a config it generates default keys — saving that state would
+# overwrite the correct keys on flash with freshly-generated throwaway ones,
+# breaking Core authentication on the next boot.
 save() {
+    if [ ! -f "$KOMODO/periphery.config.toml" ]; then
+        echo "komodo-periphery: skipping save — $KOMODO/periphery.config.toml not found (refusing to overwrite flash with default state)"
+        return 0
+    fi
     if [ -d "$KOMODO" ] && [ -n "$(ls -A "$KOMODO" 2>/dev/null)" ]; then
         mkdir -p "$KOMODO_SRC"
         cp -rp "$KOMODO"/. "$KOMODO_SRC"/ 2>/dev/null || true
@@ -49,17 +57,23 @@ start() {
     "$BINARY" --config-path "$KOMODO/periphery.config.toml" >> "$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     echo "komodo-periphery started (PID $(cat "$PIDFILE"))"
+    # Periodic save: flush /etc/komodo to flash every 15 minutes so key
+    # rotations survive hard reboots without needing a clean shutdown.
+    ( crontab -l 2>/dev/null | grep -v 'komodo-periphery.*save'; \
+      echo "*/15 * * * * sh $PLUGIN_DIR/rc.komodo-periphery save" ) | crontab -
 }
 
 stop() {
     if [ ! -f "$PIDFILE" ] || ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
         echo "komodo-periphery is not running"
         rm -f "$PIDFILE"
+        crontab -l 2>/dev/null | grep -v 'komodo-periphery.*save' | crontab -
         save
         return 0
     fi
     echo "Stopping komodo-periphery..."
     kill "$(cat "$PIDFILE")" && rm -f "$PIDFILE"
+    crontab -l 2>/dev/null | grep -v 'komodo-periphery.*save' | crontab -
     save
     echo "komodo-periphery stopped"
 }
@@ -77,5 +91,6 @@ case "$1" in
     stop)    stop ;;
     restart) stop; start ;;
     status)  status ;;
-    *)       echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+    save)    save ;;
+    *)       echo "Usage: $0 {start|stop|restart|status|save}"; exit 1 ;;
 esac
