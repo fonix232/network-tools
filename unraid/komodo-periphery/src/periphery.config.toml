@@ -29,8 +29,12 @@ private_key = "file:/etc/komodo/keys/periphery.key"
 port = 8120
 bind_ip = "[::]"
 
-## Restrict inbound connections to Komodo Core's IP only (recommended).
-# allowed_ips = ["192.0.2.1"]
+## Restrict inbound connections to Komodo Core only (recommended).
+## Supports exact IPs and CIDR subnets.
+## When Core runs in a container on THIS host, its connections arrive from the
+## Docker bridge subnets (no NAT for host-local traffic) — allow 172.16.0.0/12
+## plus loopback. Cores on other hosts appear as their LAN IP.
+allowed_ips = ["127.0.0.1", "::1", "172.16.0.0/12"]
 
 ssl_enabled = true
 
