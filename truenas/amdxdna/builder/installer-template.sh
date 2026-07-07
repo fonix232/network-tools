@@ -93,6 +93,35 @@ main() {
   # Enable the service so extensions are auto-merged on every boot.
   systemctl enable systemd-sysext 2>/dev/null || true
 
+  # Defer amdxdna loading until after the sysext merge. Without this, udev
+  # autoloads the in-tree module (and flashes stock NPU firmware) at device
+  # probe, before systemd-sysext.service merges the overlay — so the OOT
+  # driver and patched firmware in the sysexts never take effect.
+  # blacklist only blocks udev autoload; the explicit modprobe in the unit
+  # (and below) still works.
+  cat > /etc/modprobe.d/amdxdna-defer.conf <<'MODPROBE'
+# Defer amdxdna autoload until after systemd-sysext merge (amdxdna-load.service)
+blacklist amdxdna
+MODPROBE
+
+  cat > /etc/systemd/system/amdxdna-load.service <<'UNIT'
+[Unit]
+Description=Load amdxdna NPU driver after sysext merge
+Wants=systemd-sysext.service
+After=systemd-sysext.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe amdxdna
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable amdxdna-load.service 2>/dev/null || true
+
   # Merge all extensions from /var/lib/extensions (a standard sysext search path).
   systemd-sysext merge
 
@@ -109,7 +138,8 @@ main() {
   echo "  Firmware sysext: ${SYSEXT_DIR}/${firmware_raw}"
   echo
   echo "NOTE: after a TrueNAS system update, re-run this installer to restore"
-  echo "      extensions in the new boot environment."
+  echo "      extensions AND the deferred-load config in the new boot environment"
+  echo "      (updates regenerate /etc, dropping the blacklist + load unit)."
   echo
   systemd-sysext status
 
