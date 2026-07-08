@@ -266,7 +266,7 @@ jobs:
             truenas/amdxdna/amdxdna-*.raw
             truenas/amdxdna/module_version.txt
             truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-production
+          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.2-production
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v4
@@ -275,8 +275,26 @@ jobs:
             truenas/amdxdna/amdxdna-*.raw
             truenas/amdxdna/module_version.txt
             truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-debug
+          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.2-debug
           fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            truenas/amdxdna/amdxdna-*.raw
+            truenas/amdxdna/module_version.txt
+            truenas/amdxdna/xrt_version.txt
+          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-production
+          fail-on-cache-miss: false
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            truenas/amdxdna/amdxdna-*.raw
+            truenas/amdxdna/module_version.txt
+            truenas/amdxdna/xrt_version.txt
+          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-debug
+          fail-on-cache-miss: false
 
       - uses: actions/cache/restore@v4
         with:
