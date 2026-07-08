@@ -50,6 +50,63 @@ for _m in "${_mounts[@]}"; do
     _mounts_toml="${_mounts_toml:+$_mounts_toml, }$_m"
 done
 
+# -- Config restore from previous install/backup -----
+
+echo ""
+echo "=== Attempting config restore ==="
+_restored=false
+
+# Try to restore from persistent backup dataset first
+if zfs list boot-pool/komodo-periphery-backup &>/dev/null; then
+    if [ -f /var/lib/komodo-periphery-backup/periphery.config.toml.latest ]; then
+        echo "Found backup: /var/lib/komodo-periphery-backup/periphery.config.toml.latest"
+        read -rp "Restore from backup? [y/N] " _restore_backup
+        if [[ "$_restore_backup" =~ ^[Yy]$ ]]; then
+            install -d -m 0750 "$CONFIG_DIR"
+            cp /var/lib/komodo-periphery-backup/periphery.config.toml.latest "$CONFIG_FILE"
+            chmod 0640 "$CONFIG_FILE"
+            echo "Restored from backup: $CONFIG_FILE"
+            _restored=true
+        fi
+    fi
+fi
+
+# Try to restore from previous TrueNAS /etc dataset
+if [ "$_restored" = false ]; then
+    _old_etc_path=""
+    echo "Searching for previous TrueNAS /etc datasets..."
+    while IFS= read -r _dataset; do
+        _etc_path="/mnt/.etc-restore-$$/$_dataset"
+        mkdir -p "$_etc_path"
+        if zfs mount -o ro -o mountpoint="$_etc_path" "$_dataset" 2>/dev/null; then
+            if [ -f "$_etc_path/komodo/periphery.config.toml" ]; then
+                echo "Found config in: $_dataset"
+                _old_etc_path="$_etc_path"
+                break
+            fi
+            zfs unmount "$_dataset" 2>/dev/null || true
+        fi
+    done < <(zfs list -H -o name boot-pool/ROOT \
+        | grep -v "^boot-pool/ROOT$" \
+        | sort -r)
+
+    if [ -n "$_old_etc_path" ]; then
+        read -rp "Restore from previous install? [y/N] " _restore_old
+        if [[ "$_restore_old" =~ ^[Yy]$ ]]; then
+            install -d -m 0750 "$CONFIG_DIR"
+            cp "$_old_etc_path/komodo/periphery.config.toml" "$CONFIG_FILE"
+            chmod 0640 "$CONFIG_FILE"
+            echo "Restored from: $CONFIG_FILE"
+            _restored=true
+        fi
+    fi
+
+    # Cleanup temp mounts
+    [ -d /mnt/.etc-restore-$$ ] && umount /mnt/.etc-restore-$$/* 2>/dev/null || true
+    [ -d /mnt/.etc-restore-$$ ] && rmdir /mnt/.etc-restore-$$/* 2>/dev/null || true
+    [ -d /mnt/.etc-restore-$$ ] && rmdir /mnt/.etc-restore-$$ 2>/dev/null || true
+fi
+
 # -- Config check (before prompts) --------------------------------------------
 
 echo ""

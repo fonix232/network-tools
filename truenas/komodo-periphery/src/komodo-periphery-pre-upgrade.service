@@ -1,0 +1,12 @@
+[Unit]
+Description=Komodo Periphery Pre-Upgrade Backup
+Documentation=https://komo.do
+Before=truenas-update.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/lib/komodo-periphery-backup/pre-upgrade.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
