@@ -64,12 +64,11 @@ if ! zfs list "$BACKUP_DATASET" &>/dev/null; then
     zfs create -o canmount=on -o mountpoint="$BACKUP_DIR" "$BACKUP_DATASET"
 else
     echo "ZFS dataset $BACKUP_DATASET exists"
-fi
-
-# Mount if not mounted
-if ! zfs list -H "$BACKUP_DATASET" 2>/dev/null | awk '{print $7}' | grep -q "^$BACKUP_DIR$"; then
-    echo "Mounting $BACKUP_DATASET to $BACKUP_DIR"
-    zfs mount "$BACKUP_DATASET"
+    # Mount if not already mounted
+    if ! mountpoint -q "$BACKUP_DIR" 2>/dev/null; then
+        echo "Mounting $BACKUP_DATASET to $BACKUP_DIR"
+        zfs mount "$BACKUP_DATASET"
+    fi
 fi
 
 # Install backup/restore scripts
