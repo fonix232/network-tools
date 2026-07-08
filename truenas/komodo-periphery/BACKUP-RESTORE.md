@@ -1,64 +1,90 @@
 # Komodo Periphery — Config Backup & Restore
 
-On TrueNAS SCALE, `/etc` is a per-installation ZFS dataset, so upgrading TrueNAS wipes Komodo Periphery config. This guide documents the backup and restore workflow.
+On TrueNAS SCALE, `/etc` is a per-installation ZFS dataset, so upgrading TrueNAS wipes Komodo Periphery config. This guide documents automatic backup/restore via systemd hooks.
 
-## Automatic Restore on Install
-
-When you run `komodo-periphery-*.run` on a new TrueNAS version, the installer will:
-
-1. **Search for persistent backups** in `boot-pool/komodo-periphery-backup`
-2. **Search previous TrueNAS `/etc` datasets** (if they're still present)
-3. **Prompt you to restore** if config is found
-
-Simply answer `y` when prompted and your config is restored automatically.
-
-## Manual Backup Before Upgrade
-
-Before upgrading TrueNAS:
+## Setup (Run Once)
 
 ```bash
 sudo bash /path/to/backup.sh
 ```
 
-This creates a persistent `boot-pool/komodo-periphery-backup` dataset and backs up the current config there.
+This:
+1. Creates persistent `boot-pool/komodo-periphery-backup` dataset
+2. Backs up current config
+3. **Installs systemd services for automatic backup/restore on every reboot**
+
+## Automatic Workflow
+
+From now on:
+1. **Before any shutdown/reboot** → Pre-shutdown service backs up config
+2. **On boot** → Post-boot service restores if missing (e.g., after TrueNAS upgrade)
+
+No manual steps needed—config is automatically preserved across TrueNAS versions.
+
+## Installer Auto-Restore
+
+When you run `komodo-periphery-*.run` on a new TrueNAS version, it will also:
+1. Search for persistent backups in `boot-pool/komodo-periphery-backup`
+2. Search previous TrueNAS `/etc` datasets
+3. Offer to restore if found
+
+This is a second safety net if systemd services don't trigger.
+
+## Systemd Services
+
+**Pre-shutdown backup:**
+```
+komodo-periphery-pre-shutdown.service
+  Runs: Before shutdown.target, reboot.target, poweroff.target
+  Action: Backs up /etc/komodo/periphery.config.toml to persistent dataset
+```
+
+**Post-boot restore:**
+```
+komodo-periphery-post-boot.service
+  Runs: After multi-user.target
+  Action: Restores config if missing (automatic recovery after TrueNAS upgrade)
+```
+
+Both services are enabled automatically by `backup.sh`.
+
+## Manual Backup
+
+To manually trigger a backup outside of shutdown:
+
+```bash
+sudo /var/lib/komodo-periphery-backup/pre-shutdown.sh
+```
+
+## View Backups
+
+```bash
+ls /var/lib/komodo-periphery-backup/periphery.config.toml.*
+```
 
 ## Restore from Specific Backup
-
-If you want to restore a specific backup (not the latest):
 
 ```bash
 sudo cp /var/lib/komodo-periphery-backup/periphery.config.toml.TIMESTAMP /etc/komodo/periphery.config.toml
 sudo systemctl restart komodo-periphery
 ```
 
-## Backup Lifecycle
-
-- **First backup**: Creates `boot-pool/komodo-periphery-backup` dataset
-- **Subsequent backups**: Timestamped copies, with `.latest` symlink
-- **Persistent**: The backup dataset survives TrueNAS upgrades
-- **Optional**: Delete old backups manually if needed (`rm /var/lib/komodo-periphery-backup/periphery.config.toml.*`)
-
-## Workflow: TrueNAS Upgrade
-
-1. Backup: `sudo bash /path/to/backup.sh`
-2. Upgrade TrueNAS (via web UI)
-3. Wait for boot/dataset mount
-4. Run new installer: `sudo bash /tmp/komodo-periphery-*.run`
-5. Choose "Restore from backup?" → `y`
-6. Done — your config is restored
-
 ## Troubleshooting
 
-- **Restore prompt not shown?** Config may have been deleted or previous dataset unmounted. Check:
+- **Services not running?** Check status:
   ```bash
-  ls /var/lib/komodo-periphery-backup/
-  zfs list boot-pool/komodo-periphery-backup
+  systemctl status komodo-periphery-pre-shutdown.service
+  systemctl status komodo-periphery-post-boot.service
+  systemctl list-timers
   ```
 
-- **Manual restore:**
+- **Restore not triggered on boot?** Manually restore:
   ```bash
   sudo zfs mount boot-pool/komodo-periphery-backup
-  sudo ls /var/lib/komodo-periphery-backup/
-  sudo cp /var/lib/komodo-periphery-backup/periphery.config.toml.LATEST /etc/komodo/periphery.config.toml
-  sudo systemctl restart komodo-periphery
+  sudo /var/lib/komodo-periphery-backup/post-boot.sh
+  ```
+
+- **Delete old backups:**
+  ```bash
+  sudo rm /var/lib/komodo-periphery-backup/periphery.config.toml.*
   ```

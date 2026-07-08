@@ -1,0 +1,12 @@
+[Unit]
+Description=Komodo Periphery Pre-Shutdown Backup
+Documentation=https://komo.do
+Before=shutdown.target reboot.target poweroff.target
+
+[Service]
+Type=oneshot
+ExecStart=/var/lib/komodo-periphery-backup/pre-shutdown.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

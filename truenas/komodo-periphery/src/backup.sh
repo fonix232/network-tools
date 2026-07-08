@@ -37,4 +37,18 @@ else
     info "No existing config to back up ($CONFIG_SOURCE not found)"
 fi
 
-info "Backup complete"
+# Install systemd services for auto backup/restore
+info "Installing systemd services"
+install -m 0755 "$(dirname "$0")/pre-shutdown.sh" "$BACKUP_DIR/pre-shutdown.sh"
+install -m 0755 "$(dirname "$0")/post-boot.sh" "$BACKUP_DIR/post-boot.sh"
+
+# Copy service files to systemd
+install -m 0644 "$(dirname "$0")/komodo-periphery-pre-shutdown.service" /etc/systemd/system/
+install -m 0644 "$(dirname "$0")/komodo-periphery-post-boot.service" /etc/systemd/system/
+
+systemctl daemon-reload
+systemctl enable komodo-periphery-pre-shutdown.service
+systemctl enable komodo-periphery-post-boot.service
+info "Enabled auto backup/restore services"
+
+info "Setup complete"

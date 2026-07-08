@@ -1,0 +1,13 @@
+[Unit]
+Description=Komodo Periphery Post-Boot Config Restore
+Documentation=https://komo.do
+After=multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/var/lib/komodo-periphery-backup/post-boot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
