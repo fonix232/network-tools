@@ -50,61 +50,70 @@ for _m in "${_mounts[@]}"; do
     _mounts_toml="${_mounts_toml:+$_mounts_toml, }$_m"
 done
 
-# -- Config restore from previous install/backup -----
+# -- Setup backup/restore infrastructure -----
 
 echo ""
-echo "=== Attempting config restore ==="
-_restored=false
+echo "=== Setting up config backup/restore ==="
 
-# Try to restore from persistent backup dataset first
-if zfs list boot-pool/komodo-periphery-backup &>/dev/null; then
-    if [ -f /var/lib/komodo-periphery-backup/periphery.config.toml.latest ]; then
-        echo "Found backup: /var/lib/komodo-periphery-backup/periphery.config.toml.latest"
-        read -rp "Restore from backup? [y/N] " _restore_backup
-        if [[ "$_restore_backup" =~ ^[Yy]$ ]]; then
-            install -d -m 0750 "$CONFIG_DIR"
-            cp /var/lib/komodo-periphery-backup/periphery.config.toml.latest "$CONFIG_FILE"
-            chmod 0640 "$CONFIG_FILE"
-            echo "Restored from backup: $CONFIG_FILE"
-            _restored=true
-        fi
-    fi
+# Create persistent backup dataset
+BACKUP_DATASET="boot-pool/komodo-periphery-backup"
+BACKUP_DIR="/var/lib/komodo-periphery-backup"
+
+if ! zfs list "$BACKUP_DATASET" &>/dev/null; then
+    echo "Creating ZFS dataset: $BACKUP_DATASET"
+    zfs create -o canmount=on -o mountpoint="$BACKUP_DIR" "$BACKUP_DATASET"
+else
+    echo "ZFS dataset $BACKUP_DATASET exists"
 fi
 
-# Try to restore from previous TrueNAS /etc dataset
-if [ "$_restored" = false ]; then
-    _old_etc_path=""
-    echo "Searching for previous TrueNAS /etc datasets..."
-    while IFS= read -r _dataset; do
-        _etc_path="/mnt/.etc-restore-$$/$_dataset"
-        mkdir -p "$_etc_path"
-        if zfs mount -o ro -o mountpoint="$_etc_path" "$_dataset" 2>/dev/null; then
-            if [ -f "$_etc_path/komodo/periphery.config.toml" ]; then
-                echo "Found config in: $_dataset"
-                _old_etc_path="$_etc_path"
-                break
-            fi
-            zfs unmount "$_dataset" 2>/dev/null || true
-        fi
-    done < <(zfs list -H -o name boot-pool/ROOT \
-        | grep -v "^boot-pool/ROOT$" \
-        | sort -r)
+# Mount if not mounted
+if ! zfs list -H "$BACKUP_DATASET" 2>/dev/null | awk '{print $7}' | grep -q "^$BACKUP_DIR$"; then
+    echo "Mounting $BACKUP_DATASET to $BACKUP_DIR"
+    zfs mount "$BACKUP_DATASET"
+fi
 
-    if [ -n "$_old_etc_path" ]; then
-        read -rp "Restore from previous install? [y/N] " _restore_old
-        if [[ "$_restore_old" =~ ^[Yy]$ ]]; then
-            install -d -m 0750 "$CONFIG_DIR"
-            cp "$_old_etc_path/komodo/periphery.config.toml" "$CONFIG_FILE"
-            chmod 0640 "$CONFIG_FILE"
-            echo "Restored from: $CONFIG_FILE"
-            _restored=true
-        fi
-    fi
+# Install backup/restore scripts
+mkdir -p "$BACKUP_DIR"
 
-    # Cleanup temp mounts
-    [ -d /mnt/.etc-restore-$$ ] && umount /mnt/.etc-restore-$$/* 2>/dev/null || true
-    [ -d /mnt/.etc-restore-$$ ] && rmdir /mnt/.etc-restore-$$/* 2>/dev/null || true
-    [ -d /mnt/.etc-restore-$$ ] && rmdir /mnt/.etc-restore-$$ 2>/dev/null || true
+# Backup script for service stop
+cat > "$BACKUP_DIR/backup.sh" << 'BACKUP'
+#!/bin/bash
+set -euo pipefail
+CONFIG="/etc/komodo/periphery.config.toml"
+BACKUP_DIR="/var/lib/komodo-periphery-backup"
+mkdir -p "$BACKUP_DIR"
+if [[ -f "$CONFIG" ]]; then
+    TIMESTAMP=$(date +%s)
+    cp "$CONFIG" "$BACKUP_DIR/periphery.config.toml.$TIMESTAMP"
+    ln -sf "periphery.config.toml.$TIMESTAMP" "$BACKUP_DIR/periphery.config.toml.latest"
+    logger -t komodo-periphery "Config backed up on stop"
+fi
+BACKUP
+
+# Restore script for service start
+cat > "$BACKUP_DIR/restore.sh" << 'RESTORE'
+#!/bin/bash
+set -euo pipefail
+CONFIG="/etc/komodo/periphery.config.toml"
+BACKUP_DIR="/var/lib/komodo-periphery-backup"
+LATEST="$BACKUP_DIR/periphery.config.toml.latest"
+if [[ ! -f "$CONFIG" && -f "$LATEST" ]]; then
+    mkdir -p /etc/komodo
+    cp "$LATEST" "$CONFIG"
+    chmod 0640 "$CONFIG"
+    logger -t komodo-periphery "Config restored from backup"
+fi
+RESTORE
+
+chmod +x "$BACKUP_DIR/backup.sh" "$BACKUP_DIR/restore.sh"
+echo "OK: backup/restore scripts installed"
+
+# Restore from previous install if available
+if [[ ! -f "$CONFIG_FILE" && -f "$BACKUP_DIR/periphery.config.toml.latest" ]]; then
+    echo "Found backup; restoring previous config"
+    cp "$BACKUP_DIR/periphery.config.toml.latest" "$CONFIG_FILE"
+    chmod 0640 "$CONFIG_FILE"
+    _write_config=false
 fi
 
 # -- Config check (before prompts) --------------------------------------------
@@ -172,7 +181,9 @@ Wants=network-online.target systemd-sysext.service
 After=network-online.target systemd-sysext.service
 
 [Service]
+ExecStartPre=/var/lib/komodo-periphery-backup/restore.sh
 ExecStart=/usr/bin/periphery --config-path /etc/komodo/periphery.config.toml
+ExecStopPost=/var/lib/komodo-periphery-backup/backup.sh
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal

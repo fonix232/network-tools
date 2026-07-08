@@ -1,90 +1,75 @@
 # Komodo Periphery — Config Backup & Restore
 
-On TrueNAS SCALE, `/etc` is a per-installation ZFS dataset, so upgrading TrueNAS wipes Komodo Periphery config. This guide documents automatic backup/restore via systemd hooks.
-
-## Setup (Run Once)
-
-```bash
-sudo bash /path/to/backup.sh
-```
-
-This:
-1. Creates persistent `boot-pool/komodo-periphery-backup` dataset
-2. Backs up current config
-3. **Installs systemd services for automatic backup/restore on every reboot**
+On TrueNAS SCALE, `/etc` is a per-installation ZFS dataset, so upgrading TrueNAS wipes Komodo Periphery config. Config is automatically backed up on service stop and restored on service start.
 
 ## Automatic Workflow
 
-From now on:
-1. **Before any shutdown/reboot** → Pre-shutdown service backs up config
-2. **On boot** → Post-boot service restores if missing (e.g., after TrueNAS upgrade)
+1. **Service start** → `ExecStartPre` restores config from backup (if missing)
+2. **Service stop** → `ExecStopPost` backs up config to persistent dataset
+3. **TrueNAS upgrade** → reboots → systemd restarts service → config auto-restored
 
-No manual steps needed—config is automatically preserved across TrueNAS versions.
+The installer automatically:
+- Creates `boot-pool/komodo-periphery-backup` persistent ZFS dataset
+- Installs backup/restore scripts
+- Configures service with pre-start and post-stop hooks
 
-## Installer Auto-Restore
+## First Install
 
-When you run `komodo-periphery-*.run` on a new TrueNAS version, it will also:
-1. Search for persistent backups in `boot-pool/komodo-periphery-backup`
-2. Search previous TrueNAS `/etc` datasets
-3. Offer to restore if found
-
-This is a second safety net if systemd services don't trigger.
-
-## Systemd Services
-
-**Pre-shutdown backup:**
-```
-komodo-periphery-pre-shutdown.service
-  Runs: Before shutdown.target, reboot.target, poweroff.target
-  Action: Backs up /etc/komodo/periphery.config.toml to persistent dataset
-```
-
-**Post-boot restore:**
-```
-komodo-periphery-post-boot.service
-  Runs: After multi-user.target
-  Action: Restores config if missing (automatic recovery after TrueNAS upgrade)
-```
-
-Both services are enabled automatically by `backup.sh`.
-
-## Manual Backup
-
-To manually trigger a backup outside of shutdown:
-
+Run the installer normally:
 ```bash
-sudo /var/lib/komodo-periphery-backup/pre-shutdown.sh
+sudo bash /tmp/komodo-periphery-*.run
 ```
+
+It will:
+1. Set up the backup infrastructure
+2. Search for and restore previous config if available
+3. Create service with auto-backup/restore enabled
 
 ## View Backups
 
 ```bash
-ls /var/lib/komodo-periphery-backup/periphery.config.toml.*
+ls /var/lib/komodo-periphery-backup/
 ```
 
-## Restore from Specific Backup
+Each shutdown creates a timestamped backup; `.latest` symlink points to most recent.
+
+## Manual Restore from Specific Backup
 
 ```bash
 sudo cp /var/lib/komodo-periphery-backup/periphery.config.toml.TIMESTAMP /etc/komodo/periphery.config.toml
 sudo systemctl restart komodo-periphery
 ```
 
+## Verify Backup/Restore
+
+Check systemd journal:
+```bash
+journalctl -u komodo-periphery | grep -E "backed up|restored"
+```
+
+## Cleanup Old Backups
+
+```bash
+# Keep last 10 backups, delete rest
+cd /var/lib/komodo-periphery-backup/
+ls -t periphery.config.toml.* | tail -n +11 | xargs rm -f
+```
+
 ## Troubleshooting
 
-- **Services not running?** Check status:
+- **Service won't start?** Check if backup scripts exist:
   ```bash
-  systemctl status komodo-periphery-pre-shutdown.service
-  systemctl status komodo-periphery-post-boot.service
-  systemctl list-timers
+  ls -la /var/lib/komodo-periphery-backup/{backup,restore}.sh
   ```
 
-- **Restore not triggered on boot?** Manually restore:
+- **Config not restored after upgrade?** Manually restore:
   ```bash
   sudo zfs mount boot-pool/komodo-periphery-backup
-  sudo /var/lib/komodo-periphery-backup/post-boot.sh
+  sudo /var/lib/komodo-periphery-backup/restore.sh
+  sudo systemctl restart komodo-periphery
   ```
 
-- **Delete old backups:**
+- **Manual backup trigger** (if needed):
   ```bash
-  sudo rm /var/lib/komodo-periphery-backup/periphery.config.toml.*
+  sudo /var/lib/komodo-periphery-backup/backup.sh
   ```
