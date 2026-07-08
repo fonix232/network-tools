@@ -100,6 +100,38 @@ systemctl daemon-reload
 echo ""
 systemd-sysext status
 
+# -- Boot-safe service unit ----------------------------------------------------
+# The unit baked into the sysext (/usr/lib/systemd/system) does not exist when
+# systemd computes the boot transaction — sysexts merge later — so the enabled
+# service never starts after a reboot. Ship the unit in real /etc instead
+# (takes precedence over the sysext copy); After=systemd-sysext.service delays
+# the start until /usr/bin/periphery exists.
+
+cat > /etc/systemd/system/komodo-periphery.service <<'UNIT'
+[Unit]
+Description=Komodo Periphery Agent
+Documentation=https://komo.do
+Wants=network-online.target systemd-sysext.service
+After=network-online.target systemd-sysext.service
+
+[Service]
+ExecStart=/usr/bin/periphery --config-path /etc/komodo/periphery.config.toml
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=komodo-periphery
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Remove the old config-path drop-in if present — its ExecStart is now in the unit.
+rm -f /etc/systemd/system/komodo-periphery.service.d/config-path.conf 2>/dev/null || true
+rmdir /etc/systemd/system/komodo-periphery.service.d 2>/dev/null || true
+
+systemctl daemon-reload
+
 # -- Write config -------------------------------------------------------------
 
 if [ "$_write_config" = true ]; then
