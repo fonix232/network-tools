@@ -50,72 +50,34 @@ for _m in "${_mounts[@]}"; do
     _mounts_toml="${_mounts_toml:+$_mounts_toml, }$_m"
 done
 
-# -- Setup backup/restore infrastructure -----
+# -- Setup persistent config dataset -----
 
 echo ""
-echo "=== Setting up config backup/restore ==="
+echo "=== Setting up persistent config dataset ==="
 
-# Create persistent backup dataset
-BACKUP_DATASET="boot-pool/komodo-periphery-backup"
-BACKUP_DIR="/var/lib/komodo-periphery-backup"
+# Create/use persistent config dataset mounted at /etc/komodo
+CONFIG_DATASET="boot-pool/komodo-periphery-config"
 
-if ! zfs list "$BACKUP_DATASET" &>/dev/null; then
-    echo "Creating ZFS dataset: $BACKUP_DATASET"
-    zfs create -o canmount=on -o mountpoint="$BACKUP_DIR" "$BACKUP_DATASET"
+if ! zfs list "$CONFIG_DATASET" &>/dev/null; then
+    echo "Creating ZFS dataset: $CONFIG_DATASET"
+    zfs create -o canmount=on -o mountpoint="/etc/komodo" "$CONFIG_DATASET"
 else
-    echo "ZFS dataset $BACKUP_DATASET exists"
-    # Mount if not already mounted
-    if ! mountpoint -q "$BACKUP_DIR" 2>/dev/null; then
-        echo "Mounting $BACKUP_DATASET to $BACKUP_DIR"
-        zfs mount "$BACKUP_DATASET"
+    echo "ZFS dataset $CONFIG_DATASET exists"
+    # Ensure it's mounted at the right location
+    CURRENT_MP=$(zfs get -H -o value mountpoint "$CONFIG_DATASET")
+    if [[ "$CURRENT_MP" != "/etc/komodo" ]]; then
+        echo "Updating mountpoint to /etc/komodo"
+        zfs set mountpoint="/etc/komodo" "$CONFIG_DATASET"
+    fi
+    if ! mountpoint -q "/etc/komodo" 2>/dev/null; then
+        echo "Mounting $CONFIG_DATASET"
+        zfs mount "$CONFIG_DATASET"
     fi
 fi
 
-# Install backup/restore scripts
-mkdir -p "$BACKUP_DIR"
+echo "OK: config dataset ready at /etc/komodo"
 
-# Backup script for service stop
-cat > "$BACKUP_DIR/backup.sh" << 'BACKUP'
-#!/bin/bash
-set -euo pipefail
-CONFIG="/etc/komodo/periphery.config.toml"
-BACKUP_DIR="/var/lib/komodo-periphery-backup"
-mkdir -p "$BACKUP_DIR"
-if [[ -f "$CONFIG" ]]; then
-    TIMESTAMP=$(date +%s)
-    cp "$CONFIG" "$BACKUP_DIR/periphery.config.toml.$TIMESTAMP"
-    ln -sf "periphery.config.toml.$TIMESTAMP" "$BACKUP_DIR/periphery.config.toml.latest"
-    logger -t komodo-periphery "Config backed up on stop"
-fi
-BACKUP
-
-# Restore script for service start
-cat > "$BACKUP_DIR/restore.sh" << 'RESTORE'
-#!/bin/bash
-set -euo pipefail
-CONFIG="/etc/komodo/periphery.config.toml"
-BACKUP_DIR="/var/lib/komodo-periphery-backup"
-LATEST="$BACKUP_DIR/periphery.config.toml.latest"
-if [[ ! -f "$CONFIG" && -f "$LATEST" ]]; then
-    mkdir -p /etc/komodo
-    cp "$LATEST" "$CONFIG"
-    chmod 0640 "$CONFIG"
-    logger -t komodo-periphery "Config restored from backup"
-fi
-RESTORE
-
-chmod +x "$BACKUP_DIR/backup.sh" "$BACKUP_DIR/restore.sh"
-echo "OK: backup/restore scripts installed"
-
-# Restore from previous install if available
-if [[ ! -f "$CONFIG_FILE" && -f "$BACKUP_DIR/periphery.config.toml.latest" ]]; then
-    echo "Found backup; restoring previous config"
-    cp "$BACKUP_DIR/periphery.config.toml.latest" "$CONFIG_FILE"
-    chmod 0640 "$CONFIG_FILE"
-    _write_config=false
-fi
-
-# -- Config check (before prompts) --------------------------------------------
+# -- Config check --------------------------------------------------------
 
 echo ""
 echo "=== Config ==="
@@ -180,9 +142,7 @@ Wants=network-online.target systemd-sysext.service
 After=network-online.target systemd-sysext.service
 
 [Service]
-ExecStartPre=/var/lib/komodo-periphery-backup/restore.sh
 ExecStart=/usr/bin/periphery --config-path /etc/komodo/periphery.config.toml
-ExecStopPost=/var/lib/komodo-periphery-backup/backup.sh
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
@@ -198,6 +158,44 @@ rm -f /etc/systemd/system/komodo-periphery.service.d/config-path.conf 2>/dev/nul
 rmdir /etc/systemd/system/komodo-periphery.service.d 2>/dev/null || true
 
 systemctl daemon-reload
+
+# -- Register boot-time mount ------------------------------------------------
+
+echo ""
+echo "=== Registering boot-time config mount ==="
+
+_expected_cmd="/sbin/zfs mount boot-pool/komodo-periphery-config"
+_expected_comment="Mount komodo-periphery config dataset on boot"
+
+# Find existing script by comment (unique per install)
+_existing_id=$(midclt call initshutdownscript.query \
+    "[[\"comment\", \"=\", \"$_expected_comment\"]]" 2>/dev/null \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "")' 2>/dev/null || true)
+
+if [ -z "$_existing_id" ]; then
+    echo "Creating PREINIT mount script"
+    midclt call initshutdownscript.create "{
+      \"type\": \"COMMAND\",
+      \"command\": \"$_expected_cmd\",
+      \"when\": \"PREINIT\",
+      \"enabled\": true,
+      \"comment\": \"$_expected_comment\"
+    }" >/dev/null && echo "OK: PREINIT mount script created"
+else
+    _existing_cmd=$(midclt call initshutdownscript.query "[[\"id\", \"=\", $_existing_id]]" 2>/dev/null \
+        | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["command"] if d else "")' 2>/dev/null || true)
+    if [ "$_existing_cmd" != "$_expected_cmd" ]; then
+        echo "Updating PREINIT mount script (id=$_existing_id)"
+        midclt call initshutdownscript.update "$_existing_id" "{
+          \"type\": \"COMMAND\",
+          \"command\": \"$_expected_cmd\",
+          \"when\": \"PREINIT\",
+          \"enabled\": true
+        }" >/dev/null && echo "OK: PREINIT mount script updated"
+    else
+        echo "OK: PREINIT mount script already up to date (id=$_existing_id)"
+    fi
+fi
 
 # -- Write config -------------------------------------------------------------
 
