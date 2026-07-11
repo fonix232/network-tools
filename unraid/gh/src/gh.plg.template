@@ -1,0 +1,39 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name       "gh">
+  <!ENTITY version    "__VERSION__">
+  <!ENTITY plugin_dir "/boot/config/plugins/gh">
+]>
+<PLUGIN name="&name;" version="&version;" min="6.10.0">
+
+<CHANGES>
+### __VERSION__
+- Downloads latest GitHub CLI (gh) linux-amd64 binary from GitHub releases on install
+- Restores cached binary from flash on every array start
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/gh/event/started" Mode="0755">
+<INLINE>
+<![CDATA[
+__EVENT_STARTED__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+__INSTALL_SH__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+__REMOVE_SH__
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>

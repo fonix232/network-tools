@@ -1,0 +1,27 @@
+name: Build unraid/gh
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'unraid/gh/src/**'
+      - 'unraid/gh/manifest.json'
+      - 'unraid/common/**'
+      - '.github/workflows/build-unraid-gh.yml'
+      - '.github/workflows/reusable-build-release.yml'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    permissions:
+      contents: write
+    with:
+      component_label: unraid/gh
+      tag_prefix: unraid-gh
+      build_working_directory: unraid/gh
+      build_command: python3 ../common/assemble.py --version "$VERSION"
+      artifact_path: unraid/gh/gh.plg
+      extra_release_notes: |
+        Install via Unraid Plugins > Install Plugin using the released .plg URL from this release.
+    secrets: inherit

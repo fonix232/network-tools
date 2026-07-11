@@ -1,0 +1,11 @@
+#!/bin/bash
+PLUGIN_DIR="/boot/config/plugins/gh"
+CACHED="$PLUGIN_DIR/gh"
+INSTALL_PATH="/usr/local/bin/gh"
+
+if [ -f "$CACHED" ]; then
+    install -m 0755 "$CACHED" "$INSTALL_PATH"
+    echo "gh: installed from flash to $INSTALL_PATH"
+else
+    echo "gh: cached binary not found at $CACHED — reinstall the plugin to download it"
+fi

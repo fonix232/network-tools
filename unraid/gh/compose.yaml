@@ -1,0 +1,10 @@
+services:
+  build:
+    build:
+      context: ../..
+      dockerfile: unraid/common/Dockerfile.builder
+    platform: linux/amd64
+    volumes:
+      - ../..:/workspace
+    environment:
+      BUILD_COMMAND: python3 unraid/common/assemble.py --version "$$VERSION" --plugin-dir unraid/gh

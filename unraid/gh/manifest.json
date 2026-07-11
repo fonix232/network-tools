@@ -1,0 +1,9 @@
+{
+  "template": "src/gh.plg.template",
+  "output": "gh.plg",
+  "substitutions": {
+    "__EVENT_STARTED__": "src/event-started",
+    "__INSTALL_SH__": "src/install.sh",
+    "__REMOVE_SH__": "src/remove.sh"
+  }
+}

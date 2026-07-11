@@ -1,0 +1,26 @@
+name: Build truenas/gh
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'truenas/gh/**'
+      - 'truenas/common/**'
+      - '.github/workflows/build-truenas-gh.yml'
+      - '.github/workflows/reusable-build-release.yml'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    permissions:
+      contents: write
+    with:
+      component_label: truenas/gh
+      tag_prefix: truenas-gh
+      build_working_directory: truenas/gh
+      build_command: docker compose run --rm build
+      artifact_path: truenas/gh/output/*.run
+      extra_release_notes: |
+        Artifacts are self-extracting .run installers for TrueNAS SCALE.
+    secrets: inherit
