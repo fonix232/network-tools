@@ -10,7 +10,7 @@ CRON_DIR="/boot/config/plugins/gnupg2"
 
 if [ -x "$BACKUP_SH" ]; then
     "$BACKUP_SH" backup --reason "plugin removal" \
-        || echo "gnupg2: final snapshot did not run — existing snapshots left untouched"
+        || echo "gnupg2: final backup reported a problem — check the syslog"
 fi
 
 # Drop the scheduled snapshot job

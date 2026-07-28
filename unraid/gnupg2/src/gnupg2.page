@@ -33,9 +33,9 @@ exec('gpg --version 2>/dev/null | head -1', $gp_ver_out);
 $gp_gpg_ver = implode('', $gp_ver_out);
 
 $gp_snap_dir = '/boot/config/gnupg-backups';
-$gp_legacy_dir = '/boot/config/gnupg';
+$gp_flash_dir = '/boot/config/gnupg';
 $gp_snap_count = count(glob("$gp_snap_dir/gnupg-*.tar.gz") ?: []);
-$gp_legacy_ok = is_dir($gp_legacy_dir);
+$gp_legacy_ok = is_dir($gp_flash_dir);
 ?>
 
 <style>
@@ -326,19 +326,20 @@ function gpToggleImport() {
 <div class="title gp-section"><span class="left">Keyring Backup</span></div>
 <div class="pluginUpdate" style="margin-bottom:20px">
   <p>
-    Flash snapshots: <?= $gp_snap_count > 0
-        ? '<span class="gp-badge gp-badge-ok">' . (int) $gp_snap_count . ' available</span> in <code>' . gp_h($gp_snap_dir) . '/</code>'
+    Flash backup: <?= $gp_legacy_ok
+        ? '<span class="gp-badge gp-badge-ok">present</span> at <code>' . gp_h($gp_flash_dir) . '/</code>'
+        : '<span class="gp-badge gp-badge-warn">not found</span>' ?>
+    &nbsp;Snapshots: <?= $gp_snap_count > 0
+        ? '<span class="gp-badge gp-badge-ok">' . (int) $gp_snap_count . '</span> in <code>' . gp_h($gp_snap_dir) . '/</code>'
         : '<span class="gp-badge gp-badge-warn">none yet</span>' ?>
-    <?php if ($gp_legacy_ok): ?>
-      &nbsp;<span class="gp-badge gp-badge-none">legacy mirror present</span>
-    <?php endif; ?>
   </p>
   <p style="font-size:0.85em">
-    Snapshots are taken on array stop, daily at 04:40, and whenever a key is added
-    or removed. Identical snapshots are skipped, and the most recent
-    <?= (int) 10 ?> are kept. An automatic snapshot is refused if the live keyring
-    has fewer secret keys than the last one, so a keyring that empties out cannot
-    overwrite good backups.
+    The keyring is mirrored to flash on array stop and restored on array start,
+    as before. Every write to the flash backup now takes a snapshot of it first,
+    so the previous contents survive even if the mirror overwrites itself with an
+    empty keyring. Snapshots are also taken daily at 04:40 and whenever a key is
+    added or removed. Identical snapshots are skipped, and the most recent
+    <?= (int) 10 ?> are kept.
   </p>
   <p style="font-size:0.85em;color:#c99">
     Secret keys are stored unencrypted on the flash drive. Anyone with the flash
@@ -352,8 +353,8 @@ function gpToggleImport() {
   </table>
   <div id="gp-snap-empty" style="color:#888;display:none">No snapshots on flash yet.</div>
   <div class="gp-actions">
-    <input type="button" value="Snapshot now" onclick="gpCall({action:'backup'},this)">
-    <input type="button" value="Restore newest" onclick="if(confirm('Restore the newest usable snapshot? The current keyring is stashed under /root first.'))gpCall({action:'restore'},this)">
+    <input type="button" value="Backup now" onclick="gpCall({action:'backup'},this)">
+    <input type="button" value="Restore from flash" onclick="if(confirm('Restore the keyring from the flash backup? The current keyring is stashed under /root first.'))gpCall({action:'restore'},this)">
   </div>
 </div>
 

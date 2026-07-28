@@ -35,19 +35,16 @@ function gpg_cmd(string $args): string {
 }
 
 /**
- * Take a snapshot via the shared helper. $force is only for deliberately
- * destructive operations (key deletion); everything else must go through the
- * helper's regression guard, which refuses to record a keyring that has lost
- * secret keys. Never mirror-with-delete onto flash.
+ * Update the flash backup via the shared helper. The helper snapshots the
+ * existing flash backup before the mirror touches it, so callers do not need to
+ * take their own precautions before destructive operations.
  */
-function run_snapshot(string $reason, bool $force = false): array {
+function run_backup(string $reason): array {
     global $BACKUP_SH;
     if (!is_executable($BACKUP_SH)) {
-        return [false, 'Backup helper not installed; keyring was NOT snapshotted.'];
+        return [false, 'Backup helper not installed; flash backup was NOT updated.'];
     }
-    $cmd = escapeshellarg($BACKUP_SH) . ' backup'
-         . ($force ? ' --force' : '')
-         . ' --reason ' . escapeshellarg($reason) . ' 2>&1';
+    $cmd = escapeshellarg($BACKUP_SH) . ' backup --reason ' . escapeshellarg($reason) . ' 2>&1';
     exec($cmd, $out, $rc);
     return [$rc === 0, implode("\n", $out)];
 }
@@ -167,14 +164,12 @@ switch ($action) {
         }
         if ($cur) $keys[] = $cur;
 
-        $snapshots = snapshot_list();
         echo json_encode([
             'ok'           => true,
             'packages'     => $pkgs,
             'keys'         => $keys,
-            'flash_backup' => count($snapshots) > 0,
-            'legacy_dir'   => is_dir($FLASH_GPG),
-            'snapshots'    => $snapshots,
+            'flash_backup' => is_dir($FLASH_GPG),
+            'snapshots'    => snapshot_list(),
         ]);
         exit;
 
@@ -321,18 +316,14 @@ switch ($action) {
         }
 
         // Snapshot to flash
-        [$snap_ok, $snap_msg] = run_snapshot("key generated: $uid");
-        $note = $snap_ok ? '' : "\n\nWARNING — snapshot to flash failed:\n$snap_msg";
+        [$snap_ok, $snap_msg] = run_backup("key generated: $uid");
+        $note = $snap_ok ? '' : "\n\nWARNING — flash backup failed:\n$snap_msg";
         api_json(true, "Key generated for: $uid\n" . implode("\n", $out) . $note);
         break;
 
     case 'delete_key':
         $fpr = preg_replace('/[^A-Fa-f0-9]/', '', $_POST['fingerprint'] ?? '');
         if (strlen($fpr) < 16) api_json(false, 'Invalid fingerprint.');
-
-        // Snapshot *before* destroying anything, so the pre-delete state always
-        // has a recovery point on flash.
-        run_snapshot("before deleting $fpr");
 
         exec(gpg_cmd('--batch --yes --delete-secret-and-public-key ') . escapeshellarg($fpr) . ' 2>&1', $out, $rc);
         if ($rc !== 0) {
@@ -342,10 +333,10 @@ switch ($action) {
                 api_json(false, "Delete failed:\n" . implode("\n", array_merge($out, $out2)));
             }
         }
-        // Forced: this is a deliberate deletion, so the guard is bypassed. Older
-        // snapshots are retained, so the key remains recoverable from flash.
-        run_snapshot("key deleted: $fpr", true);
-        api_json(true, "Deleted key $fpr\nEarlier snapshots in $SNAP_DIR still contain this key if you need it back.");
+        // The helper snapshots the flash backup before the mirror drops the key
+        // from it, so this deletion stays recoverable.
+        run_backup("key deleted: $fpr");
+        api_json(true, "Deleted key $fpr\nThe snapshot taken just before this in $SNAP_DIR still contains it if you need it back.");
         break;
 
     case 'export_key':
@@ -370,22 +361,20 @@ switch ($action) {
         if ($rc !== 0) {
             api_json(false, "Import failed:\n" . implode("\n", $out));
         }
-        [$snap_ok, $snap_msg] = run_snapshot('key imported');
-        $note = $snap_ok ? '' : "\n\nWARNING — snapshot to flash failed:\n$snap_msg";
+        [$snap_ok, $snap_msg] = run_backup('key imported');
+        $note = $snap_ok ? '' : "\n\nWARNING — flash backup failed:\n$snap_msg";
         api_json(true, "Key imported.\n" . implode("\n", $out) . $note);
         break;
 
     case 'backup':
-        $force = ($_POST['force'] ?? '') === '1';
-        [$ok, $msg] = run_snapshot('manual', $force);
-        api_json($ok, $msg !== '' ? $msg : ($ok ? 'Keyring snapshot written to flash.' : 'Snapshot failed.'));
+        [$ok, $msg] = run_backup('manual');
+        api_json($ok, $msg !== '' ? $msg : ($ok ? 'Flash backup updated.' : 'Backup failed.'));
         break;
 
     case 'restore':
-        // Explicit user action, so --force: overwrite whatever is in RAM. The
-        // helper still stashes the current keyring under /root first.
+        // The helper stashes the current keyring under /root before merging.
         $file = basename(trim($_POST['file'] ?? ''));
-        $args = ' restore --force';
+        $args = ' restore';
         if ($file !== '' && $file !== '.' && $file !== '..') {
             if (!preg_match('/^gnupg-[0-9]{8}-[0-9]{6}\.tar\.gz$/', $file)) {
                 api_json(false, 'Invalid snapshot name.');
