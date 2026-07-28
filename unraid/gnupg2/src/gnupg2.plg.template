@@ -4,7 +4,11 @@
   <!ENTITY version    "__VERSION__">
   <!ENTITY plugin_dir "/boot/config/plugins/gnupg2">
 ]>
-<PLUGIN name="&name;" version="&version;" min="6.10.0">
+<PLUGIN name="&name;"
+        version="&version;"
+        pluginURL="__PLUGIN_URL__"
+        support="__SUPPORT_URL__"
+        min="6.10.0">
 
 <CHANGES>
 ### __VERSION__
