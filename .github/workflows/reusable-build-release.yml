@@ -30,6 +30,15 @@ on:
         required: false
         default: ""
         type: string
+      publish_path:
+        description: >
+          Optional repo path to publish the built artifact to on the default
+          branch, e.g. plugins/gnupg2.plg. This is the stable URL Unraid's
+          plugin update checker fetches via the plugin's pluginURL attribute,
+          so it must always carry the newest release.
+        required: false
+        default: ""
+        type: string
 
 jobs:
   build-and-release:
@@ -97,3 +106,60 @@ jobs:
           name: ${{ inputs.component_label }} ${{ steps.vars.outputs.version }}
           body: ${{ steps.notes.outputs.body }}
           files: ${{ inputs.artifact_path }}
+
+      # Unraid's plugin update checker fetches the URL in the installed .plg's
+      # pluginURL attribute and compares its version attribute against the
+      # installed one. That URL has to be stable, which rules out
+      # releases/latest/download — "latest" resolves across the whole repo, so
+      # with several components releasing here it would usually point at the
+      # wrong component's release. Publishing the built .plg to a fixed path on
+      # the default branch gives each plugin its own permanent raw URL instead.
+      - name: Publish plugin file for the Unraid updater
+        if: ${{ inputs.publish_path != '' }}
+        env:
+          PUBLISH_PATH: ${{ inputs.publish_path }}
+          ARTIFACT_PATH: ${{ inputs.artifact_path }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+          VERSION: ${{ steps.vars.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$ARTIFACT_PATH" ]; then
+            echo "::error::publish_path is set but artifact_path '$ARTIFACT_PATH' is not a single file"
+            exit 1
+          fi
+
+          staged="$(mktemp)"
+          cp "$ARTIFACT_PATH" "$staged"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Sibling plugin builds triggered by the same push race for this
+          # branch, so re-base onto whatever landed and try again.
+          for attempt in 1 2 3; do
+            git fetch --depth=1 origin "$DEFAULT_BRANCH"
+            git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
+
+            mkdir -p "$(dirname "$PUBLISH_PATH")"
+            cp "$staged" "$PUBLISH_PATH"
+            git add -f "$PUBLISH_PATH"
+
+            if git diff --cached --quiet; then
+              echo "$PUBLISH_PATH already up to date, nothing to publish."
+              exit 0
+            fi
+
+            git commit -q -m "chore($TAG_PREFIX): publish $VERSION for the Unraid plugin updater [skip ci]"
+            if git push origin "$DEFAULT_BRANCH"; then
+              echo "Published $PUBLISH_PATH at version $VERSION"
+              exit 0
+            fi
+
+            echo "Push rejected on attempt $attempt, retrying"
+            sleep $((attempt * 5))
+          done
+
+          echo "::error::Could not publish $PUBLISH_PATH after 3 attempts"
+          exit 1

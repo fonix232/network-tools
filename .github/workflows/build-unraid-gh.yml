@@ -22,6 +22,12 @@ jobs:
       build_working_directory: unraid/gh
       build_command: python3 ../common/assemble.py --version "$VERSION"
       artifact_path: unraid/gh/gh.plg
+      publish_path: plugins/gh.plg
       extra_release_notes: |
-        Install via Unraid Plugins > Install Plugin using the released .plg URL from this release.
+        Install via Unraid Plugins > Install Plugin using:
+        https://raw.githubusercontent.com/fonix232/network-tools/main/plugins/gh.plg
+
+        That URL always serves the newest build, and Unraid's plugin update
+        checker uses it to offer future updates automatically. The .plg attached
+        to this release is the pinned copy of this specific version.
     secrets: inherit

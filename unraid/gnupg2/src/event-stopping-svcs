@@ -1,12 +1,13 @@
 #!/bin/bash
 # gnupg2 plugin — shutdown hook
-# Backup GPG keyring from RAM to flash.
+# Snapshot the existing flash backup, then mirror the RAM keyring onto it.
+#
+# The snapshot happens first, so even if the RAM keyring is empty or damaged by
+# the time we get here, the last good flash backup is preserved before the
+# mirror overwrites it.
 
-FLASH_GPG="/boot/config/gnupg"
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
 
-if [ -d /root/.gnupg ]; then
-    mkdir -p "$FLASH_GPG"
-    rsync -a --delete --exclude='S.*' --exclude='*.lock' --exclude='.#lk*' \
-        /root/.gnupg/ "$FLASH_GPG/"
-    echo "gnupg2: backed up keyring to flash"
-fi
+[ -x "$BACKUP_SH" ] || { echo "gnupg2: backup helper missing, skipping keyring backup"; exit 0; }
+
+"$BACKUP_SH" backup --reason "array stop" || echo "gnupg2: keyring backup reported a problem — check the syslog"

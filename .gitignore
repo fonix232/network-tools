@@ -6,5 +6,10 @@ __pycache__/
 *.plg
 output/*.run
 
+# ...except the published copies CI commits back to main. These are what
+# Unraid's plugin update checker fetches via each plugin's pluginURL, so they
+# must be tracked and must always reflect the newest release.
+!plugins/*.plg
+
 # OS
 .DS_Store

@@ -4,14 +4,31 @@
   <!ENTITY version    "__VERSION__">
   <!ENTITY plugin_dir "/boot/config/plugins/gnupg2">
 ]>
-<PLUGIN name="&name;" version="&version;" min="6.10.0">
+<PLUGIN name="&name;"
+        version="&version;"
+        pluginURL="__PLUGIN_URL__"
+        support="__SUPPORT_URL__"
+        min="6.10.0">
 
 <CHANGES>
 ### __VERSION__
 - Downloads gnupg2 + dependencies from Slackware mirror to /boot/extra
 - Web UI for package updates and GPG key management
-- Automatic keyring backup/restore on shutdown/boot
+- Keyring mirrored to flash on array stop and restored on array start
+- Every write to the flash backup snapshots it first, into
+  /boot/config/gnupg-backups, so the previous contents survive a bad mirror
+- Daily scheduled snapshot in addition to the array-stop backup
+- Restores reassert 0700/0600 permissions lost to vfat, and can pull from any
+  retained snapshot
 </CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh" Mode="0755">
+<INLINE>
+<![CDATA[
+__BACKUP_SH__
+]]>
+</INLINE>
+</FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/gnupg2/event/started" Mode="0755">
 <INLINE>

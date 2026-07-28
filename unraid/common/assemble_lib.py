@@ -65,9 +65,13 @@ def assemble_plg(plugin_dir: Path, version: str, output: str | None = None) -> N
       - template: path to .plg.template (relative to plugin_dir)
       - output:   output filename (default)
       - substitutions: dict of __PLACEHOLDER__ -> source filename (relative to plugin_dir)
+      - constants (optional): dict of __PLACEHOLDER__ -> literal string
       - txz (optional): dict with name, placeholder, slack_desc, files[]
 
     Each txz.files entry: {src, dest, mode} where mode is an octal string like "0755".
+
+    Constants are applied last, so they resolve inside inlined file content as
+    well as in the template itself.
     """
     manifest_path = plugin_dir / "manifest.json"
     if not manifest_path.exists():
@@ -107,6 +111,14 @@ def assemble_plg(plugin_dir: Path, version: str, output: str | None = None) -> N
         if not filepath.exists():
             raise FileNotFoundError(f"Source file not found: {filepath}")
         content = content.replace(placeholder, filepath.read_text(encoding="utf-8").rstrip("\n"))
+
+    # Literal constants (plugin URL, support URL, ...)
+    for placeholder, value in manifest.get("constants", {}).items():
+        content = content.replace(placeholder, str(value))
+
+    leftover = sorted({m for m in ("__PLUGIN_URL__", "__SUPPORT_URL__") if m in content})
+    if leftover:
+        raise ValueError(f"Unresolved placeholder(s) in {out_file.name}: {', '.join(leftover)}")
 
     out_file.write_text(content, encoding="utf-8")
     print(f"Assembled: {out_file} (plugin version {version})")
