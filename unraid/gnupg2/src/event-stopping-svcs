@@ -1,12 +1,17 @@
 #!/bin/bash
 # gnupg2 plugin — shutdown hook
-# Backup GPG keyring from RAM to flash.
+# Snapshot the GPG keyring from RAM to flash.
+#
+# Deliberately NOT forced: if the keyring lost secret keys since the last
+# snapshot, the helper refuses and leaves the existing snapshots intact. An
+# array stop must never be able to destroy the backups.
 
-FLASH_GPG="/boot/config/gnupg"
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
 
-if [ -d /root/.gnupg ]; then
-    mkdir -p "$FLASH_GPG"
-    rsync -a --delete --exclude='S.*' --exclude='*.lock' --exclude='.#lk*' \
-        /root/.gnupg/ "$FLASH_GPG/"
-    echo "gnupg2: backed up keyring to flash"
+[ -x "$BACKUP_SH" ] || { echo "gnupg2: backup helper missing, skipping keyring snapshot"; exit 0; }
+
+if "$BACKUP_SH" backup --reason "array stop"; then
+    echo "gnupg2: keyring snapshot complete"
+else
+    echo "gnupg2: keyring snapshot did NOT run — existing snapshots left untouched (exit $?)"
 fi

@@ -2,6 +2,7 @@
   "template": "src/gnupg2.plg.template",
   "output": "gnupg2.plg",
   "substitutions": {
+    "__BACKUP_SH__": "src/gnupg2-backup.sh",
     "__EVENT_STARTED__": "src/event-started",
     "__EVENT_STOPPING_SVCS__": "src/event-stopping-svcs",
     "__WEB_PAGE__": "src/gnupg2.page",

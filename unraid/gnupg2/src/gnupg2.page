@@ -32,7 +32,10 @@ $gp_gpg_ver = '';
 exec('gpg --version 2>/dev/null | head -1', $gp_ver_out);
 $gp_gpg_ver = implode('', $gp_ver_out);
 
-$gp_flash_ok = is_dir('/boot/config/gnupg');
+$gp_snap_dir = '/boot/config/gnupg-backups';
+$gp_legacy_dir = '/boot/config/gnupg';
+$gp_snap_count = count(glob("$gp_snap_dir/gnupg-*.tar.gz") ?: []);
+$gp_legacy_ok = is_dir($gp_legacy_dir);
 ?>
 
 <style>
@@ -195,6 +198,42 @@ function gpImportKey(btn) {
     gpCall({action: 'import_key', armor: armor}, btn);
 }
 
+function gpRestoreSnapshot(file, btn) {
+    if (!confirm('Restore keyring from ' + file + '?\n\nThis merges the snapshot over the current keyring. The current keyring is stashed under /root first.')) return;
+    gpCall({action: 'restore', file: file}, btn);
+}
+
+function gpHumanSize(n) {
+    n = parseInt(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return (n / 1024 / 1024).toFixed(1) + ' MiB';
+}
+
+function gpRenderSnapshots(snaps) {
+    var table = document.getElementById('gp-snap-table');
+    var empty = document.getElementById('gp-snap-empty');
+    if (!table || !empty) return;
+    if (!snaps || snaps.length === 0) { empty.style.display = ''; return; }
+
+    var rows = snaps.map(function(s) {
+        var esc = function(v) { return String(v == null ? '' : v).replace(/</g, '&lt;'); };
+        var secretBadge = s.secrets > 0
+            ? '<span class="gp-badge gp-badge-ok">' + s.secrets + '</span>'
+            : '<span class="gp-badge gp-badge-warn">0</span>';
+        return '<tr>' +
+            '<td class="gp-key-fpr">' + esc(s.file) + '</td>' +
+            '<td>' + esc((s.created || '').replace('T', ' ').replace(/[+-]\d\d:\d\d$/, '')) + '</td>' +
+            '<td>' + secretBadge + '</td>' +
+            '<td>' + esc(s.reason) + '</td>' +
+            '<td>' + gpHumanSize(s.size) + '</td>' +
+            '<td><input type="button" value="Restore" onclick="gpRestoreSnapshot(\'' + esc(s.file) + '\',this)"></td>' +
+            '</tr>';
+    });
+    document.getElementById('gp-snap-body').innerHTML = rows.join('');
+    table.style.display = '';
+}
+
 function gpToggleImport() {
     var box = document.getElementById('gp-import-box');
     box.style.display = box.style.display === 'none' ? '' : 'none';
@@ -287,16 +326,34 @@ function gpToggleImport() {
 <div class="title gp-section"><span class="left">Keyring Backup</span></div>
 <div class="pluginUpdate" style="margin-bottom:20px">
   <p>
-    Flash backup: <?= $gp_flash_ok
-        ? '<span class="gp-badge gp-badge-ok">present</span> at <code>/boot/config/gnupg/</code>'
-        : '<span class="gp-badge gp-badge-warn">not found</span>' ?>
+    Flash snapshots: <?= $gp_snap_count > 0
+        ? '<span class="gp-badge gp-badge-ok">' . (int) $gp_snap_count . ' available</span> in <code>' . gp_h($gp_snap_dir) . '/</code>'
+        : '<span class="gp-badge gp-badge-warn">none yet</span>' ?>
+    <?php if ($gp_legacy_ok): ?>
+      &nbsp;<span class="gp-badge gp-badge-none">legacy mirror present</span>
+    <?php endif; ?>
   </p>
   <p style="font-size:0.85em">
-    Keys are automatically backed up on shutdown and restored on array start.
+    Snapshots are taken on array stop, daily at 04:40, and whenever a key is added
+    or removed. Identical snapshots are skipped, and the most recent
+    <?= (int) 10 ?> are kept. An automatic snapshot is refused if the live keyring
+    has fewer secret keys than the last one, so a keyring that empties out cannot
+    overwrite good backups.
   </p>
+  <p style="font-size:0.85em;color:#c99">
+    Secret keys are stored unencrypted on the flash drive. Anyone with the flash
+    device, or a copy of a flash backup <code>.zip</code>, has your private keys.
+  </p>
+  <table class="gp-table" id="gp-snap-table" style="display:none">
+    <thead>
+      <tr><th>Snapshot</th><th>Taken</th><th>Secret keys</th><th>Reason</th><th>Size</th><th></th></tr>
+    </thead>
+    <tbody id="gp-snap-body"></tbody>
+  </table>
+  <div id="gp-snap-empty" style="color:#888;display:none">No snapshots on flash yet.</div>
   <div class="gp-actions">
-    <input type="button" value="Backup now" onclick="gpCall({action:'backup'},this)">
-    <input type="button" value="Restore from flash" onclick="if(confirm('Restore keyring from flash? This will overwrite the current keyring.'))gpCall({action:'restore'},this)">
+    <input type="button" value="Snapshot now" onclick="gpCall({action:'backup'},this)">
+    <input type="button" value="Restore newest" onclick="if(confirm('Restore the newest usable snapshot? The current keyring is stashed under /root first.'))gpCall({action:'restore'},this)">
   </div>
 </div>
 
@@ -307,7 +364,9 @@ function gpToggleImport() {
     .then(function(r) { return r.json(); })
     .then(function(j) {
         document.getElementById('gp-keys-loading').style.display = 'none';
-        if (!j.ok || !j.keys) return;
+        if (!j.ok) return;
+        gpRenderSnapshots(j.snapshots);
+        if (!j.keys) return;
         var tbody = document.getElementById('gp-keys-body');
         document.getElementById('gp-keys-table').style.display = '';
         if (j.keys.length === 0) {

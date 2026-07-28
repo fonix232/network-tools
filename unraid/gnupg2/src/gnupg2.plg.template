@@ -10,8 +10,21 @@
 ### __VERSION__
 - Downloads gnupg2 + dependencies from Slackware mirror to /boot/extra
 - Web UI for package updates and GPG key management
-- Automatic keyring backup/restore on shutdown/boot
+- Versioned keyring snapshots on flash (/boot/config/gnupg-backups), retained
+  across array stops, key changes and plugin removal
+- Automatic snapshots are refused when the live keyring has lost secret keys,
+  so an empty keyring can no longer overwrite good backups
+- Daily scheduled snapshot in addition to the array-stop snapshot
+- Restores merge into the existing keyring and reassert 0700/0600 permissions
 </CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh" Mode="0755">
+<INLINE>
+<![CDATA[
+__BACKUP_SH__
+]]>
+</INLINE>
+</FILE>
 
 <FILE Name="/usr/local/emhttp/plugins/gnupg2/event/started" Mode="0755">
 <INLINE>

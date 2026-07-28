@@ -1,15 +1,22 @@
 #!/bin/bash
 # gnupg2 plugin — array start hook
-# Restore GPG keyring from flash to RAM.
+# Restore GPG keyring from flash to RAM (/root is tmpfs and starts empty).
 
-FLASH_GPG="/boot/config/gnupg"
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
+CRON_DIR="/boot/config/plugins/gnupg2"
 
-if [ -d "$FLASH_GPG" ]; then
-    mkdir -p /root/.gnupg
-    chmod 700 /root/.gnupg
-    rsync -a --exclude='S.*' --exclude='*.lock' --exclude='.#lk*' \
-        "$FLASH_GPG/" /root/.gnupg/
-    echo "gnupg2: restored keyring from flash"
-else
-    echo "gnupg2: no keyring backup found on flash"
+[ -x "$BACKUP_SH" ] || { echo "gnupg2: backup helper missing, cannot restore keyring"; exit 0; }
+
+"$BACKUP_SH" restore
+
+# /etc is tmpfs, so the daily snapshot job has to be (re)registered every boot.
+# Without it the only backup trigger is array stop, which on a box that stays up
+# for months means no recovery points at all.
+mkdir -p "$CRON_DIR"
+cat > "$CRON_DIR/gnupg2.cron" <<'CRON'
+# Daily GPG keyring snapshot to flash (gnupg2 plugin)
+40 4 * * * /usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh backup --reason scheduled &>/dev/null
+CRON
+if command -v update_cron >/dev/null 2>&1; then
+    update_cron
 fi

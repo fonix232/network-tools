@@ -12,7 +12,8 @@ lookup_package() {
     local name="$1"
     echo "$CHECKSUMS" | grep -oP "(?<=\./)slackware64/[^/]+/${name}-[^\s]+\.txz(?=\s|$)" | head -1
 }
-FLASH_GPG="/boot/config/gnupg"
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
+CRON_DIR="/boot/config/plugins/gnupg2"
 
 # Detect Slackware base — Unraid 7.x reports "Slackware 15.0+" but tracks -current
 SLACK_VER=$(cat /etc/slackware-version 2>/dev/null)
@@ -63,13 +64,23 @@ for name in $PACKAGES; do
     upgradepkg --install-new "$EXTRA_DIR/$filename" 2>&1
 done
 
-# Restore GPG keyring if backup exists
-if [ -d "$FLASH_GPG" ]; then
-    mkdir -p /root/.gnupg
-    chmod 700 /root/.gnupg
-    rsync -a --exclude='S.*' --exclude='*.lock' --exclude='.#lk*' \
-        "$FLASH_GPG/" /root/.gnupg/
-    echo "gnupg2: restored keyring from flash"
+# Restore GPG keyring from the newest usable snapshot (falls back to the legacy
+# /boot/config/gnupg mirror for installs that predate snapshot backups)
+if [ -x "$BACKUP_SH" ]; then
+    "$BACKUP_SH" restore || echo "gnupg2: WARNING — keyring restore failed, snapshots left intact"
+
+    # Register the daily snapshot job; /etc is tmpfs so event-started re-registers
+    # it on every boot as well.
+    mkdir -p "$CRON_DIR"
+    cat > "$CRON_DIR/gnupg2.cron" <<'CRON'
+# Daily GPG keyring snapshot to flash (gnupg2 plugin)
+40 4 * * * /usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh backup --reason scheduled &>/dev/null
+CRON
+    if command -v update_cron >/dev/null 2>&1; then
+        update_cron
+    fi
+else
+    echo "gnupg2: WARNING — backup helper missing, keyring not restored"
 fi
 
 echo "gnupg2: install complete"

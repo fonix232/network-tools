@@ -9,7 +9,10 @@
 
 header('Content-Type: application/json');
 
-$FLASH_GPG  = '/boot/config/gnupg';
+$FLASH_GPG  = '/boot/config/gnupg';           // legacy mirror — read-only fallback
+$SNAP_DIR   = '/boot/config/gnupg-backups';   // versioned snapshots
+$BACKUP_SH  = '/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh';
+$GPG_HOME   = '/root/.gnupg';
 $EXTRA_DIR  = '/boot/extra';
 $PKG_DB     = '/var/lib/pkgtools/packages';
 $PACKAGES   = ['gnupg2', 'libassuan', 'libksba', 'npth'];
@@ -19,6 +22,43 @@ function api_json(bool $ok, string $msg): void {
     if (ob_get_level()) ob_end_flush();
     flush();
     exit;
+}
+
+/**
+ * emhttp does not necessarily run with HOME=/root, so pin GNUPGHOME rather than
+ * letting gpg guess — otherwise the web UI can end up managing a different
+ * keyring than the boot-time restore does.
+ */
+function gpg_cmd(string $args): string {
+    global $GPG_HOME;
+    return 'GNUPGHOME=' . escapeshellarg($GPG_HOME) . ' gpg ' . $args;
+}
+
+/**
+ * Take a snapshot via the shared helper. $force is only for deliberately
+ * destructive operations (key deletion); everything else must go through the
+ * helper's regression guard, which refuses to record a keyring that has lost
+ * secret keys. Never mirror-with-delete onto flash.
+ */
+function run_snapshot(string $reason, bool $force = false): array {
+    global $BACKUP_SH;
+    if (!is_executable($BACKUP_SH)) {
+        return [false, 'Backup helper not installed; keyring was NOT snapshotted.'];
+    }
+    $cmd = escapeshellarg($BACKUP_SH) . ' backup'
+         . ($force ? ' --force' : '')
+         . ' --reason ' . escapeshellarg($reason) . ' 2>&1';
+    exec($cmd, $out, $rc);
+    return [$rc === 0, implode("\n", $out)];
+}
+
+function snapshot_list(): array {
+    global $BACKUP_SH;
+    if (!is_executable($BACKUP_SH)) return [];
+    exec(escapeshellarg($BACKUP_SH) . ' list --json 2>/dev/null', $out, $rc);
+    if ($rc !== 0) return [];
+    $parsed = json_decode(implode('', $out), true);
+    return is_array($parsed) ? $parsed : [];
 }
 
 function installed_version(string $name): string {
@@ -73,8 +113,8 @@ switch ($action) {
 
         // GPG keys
         $keys = [];
-        exec('gpg --batch --with-colons --list-keys 2>/dev/null', $pub_out);
-        exec('gpg --batch --with-colons --list-secret-keys 2>/dev/null', $sec_out);
+        exec(gpg_cmd('--batch --with-colons --list-keys 2>/dev/null'), $pub_out);
+        exec(gpg_cmd('--batch --with-colons --list-secret-keys 2>/dev/null'), $sec_out);
         $sec_fps = [];
         foreach ($sec_out as $line) {
             $fields = explode(':', $line);
@@ -127,8 +167,19 @@ switch ($action) {
         }
         if ($cur) $keys[] = $cur;
 
-        $flash_ok = is_dir($FLASH_GPG);
-        echo json_encode(['ok' => true, 'packages' => $pkgs, 'keys' => $keys, 'flash_backup' => $flash_ok]);
+        $snapshots = snapshot_list();
+        echo json_encode([
+            'ok'           => true,
+            'packages'     => $pkgs,
+            'keys'         => $keys,
+            'flash_backup' => count($snapshots) > 0,
+            'legacy_dir'   => is_dir($FLASH_GPG),
+            'snapshots'    => $snapshots,
+        ]);
+        exit;
+
+    case 'list_backups':
+        echo json_encode(['ok' => true, 'snapshots' => snapshot_list()]);
         exit;
 
     case 'check_updates':
@@ -237,7 +288,7 @@ switch ($action) {
         $add_encr = ($_POST['key_encr'] ?? '1') === '1';
 
         $uid = $email !== '' ? "$name <$email>" : $name;
-        exec('gpg --batch --passphrase "" --quick-gen-key '
+        exec(gpg_cmd('--batch --passphrase "" --quick-gen-key ')
             . escapeshellarg($uid) . ' '
             . escapeshellarg($algo) . ' '
             . escapeshellarg($usages) . ' never 2>&1', $out, $rc);
@@ -246,7 +297,7 @@ switch ($action) {
         }
 
         // Get the fingerprint of the newly created key
-        exec('gpg --batch --with-colons --list-key ' . escapeshellarg($uid) . ' 2>/dev/null', $list_out);
+        exec(gpg_cmd('--batch --with-colons --list-key ') . escapeshellarg($uid) . ' 2>/dev/null', $list_out);
         $fpr = '';
         foreach ($list_out as $line) {
             $f = explode(':', $line);
@@ -260,7 +311,7 @@ switch ($action) {
                 'nistp256' => 'nistp256', 'nistp384' => 'nistp384', 'nistp521' => 'nistp521',
             ];
             $encr_algo = $encr_algo_map[$algo] ?? 'cv25519';
-            exec('gpg --batch --passphrase "" --quick-add-key '
+            exec(gpg_cmd('--batch --passphrase "" --quick-add-key ')
                 . escapeshellarg($fpr) . ' '
                 . escapeshellarg($encr_algo) . ' encr never 2>&1', $sub_out, $sub_rc);
             if ($sub_rc !== 0) {
@@ -269,31 +320,38 @@ switch ($action) {
             $out = array_merge($out, $sub_out);
         }
 
-        // Backup to flash
-        exec('rsync -a --delete --exclude="S.*" --exclude="*.lock" --exclude=".#lk*" /root/.gnupg/ ' . escapeshellarg($FLASH_GPG) . '/ 2>&1');
-        api_json(true, "Key generated for: $uid\n" . implode("\n", $out));
+        // Snapshot to flash
+        [$snap_ok, $snap_msg] = run_snapshot("key generated: $uid");
+        $note = $snap_ok ? '' : "\n\nWARNING — snapshot to flash failed:\n$snap_msg";
+        api_json(true, "Key generated for: $uid\n" . implode("\n", $out) . $note);
         break;
 
     case 'delete_key':
         $fpr = preg_replace('/[^A-Fa-f0-9]/', '', $_POST['fingerprint'] ?? '');
         if (strlen($fpr) < 16) api_json(false, 'Invalid fingerprint.');
 
-        exec('gpg --batch --yes --delete-secret-and-public-key ' . escapeshellarg($fpr) . ' 2>&1', $out, $rc);
+        // Snapshot *before* destroying anything, so the pre-delete state always
+        // has a recovery point on flash.
+        run_snapshot("before deleting $fpr");
+
+        exec(gpg_cmd('--batch --yes --delete-secret-and-public-key ') . escapeshellarg($fpr) . ' 2>&1', $out, $rc);
         if ($rc !== 0) {
             // May not have secret key, try public only
-            exec('gpg --batch --yes --delete-keys ' . escapeshellarg($fpr) . ' 2>&1', $out2, $rc2);
+            exec(gpg_cmd('--batch --yes --delete-keys ') . escapeshellarg($fpr) . ' 2>&1', $out2, $rc2);
             if ($rc2 !== 0) {
                 api_json(false, "Delete failed:\n" . implode("\n", array_merge($out, $out2)));
             }
         }
-        exec('rsync -a --delete --exclude="S.*" --exclude="*.lock" --exclude=".#lk*" /root/.gnupg/ ' . escapeshellarg($FLASH_GPG) . '/ 2>&1');
-        api_json(true, "Deleted key $fpr");
+        // Forced: this is a deliberate deletion, so the guard is bypassed. Older
+        // snapshots are retained, so the key remains recoverable from flash.
+        run_snapshot("key deleted: $fpr", true);
+        api_json(true, "Deleted key $fpr\nEarlier snapshots in $SNAP_DIR still contain this key if you need it back.");
         break;
 
     case 'export_key':
         $fpr = preg_replace('/[^A-Fa-f0-9]/', '', $_GET['fingerprint'] ?? '');
         if (strlen($fpr) < 16) api_json(false, 'Invalid fingerprint.');
-        exec('gpg --batch --armor --export ' . escapeshellarg($fpr) . ' 2>&1', $out, $rc);
+        exec(gpg_cmd('--batch --armor --export ') . escapeshellarg($fpr) . ' 2>&1', $out, $rc);
         if ($rc !== 0 || empty($out)) {
             api_json(false, "Export failed:\n" . implode("\n", $out));
         }
@@ -307,27 +365,43 @@ switch ($action) {
         }
         $tmp = tempnam('/tmp', 'gpg-import-');
         file_put_contents($tmp, $armor);
-        exec('gpg --batch --import ' . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
+        exec(gpg_cmd('--batch --import ') . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
         @unlink($tmp);
         if ($rc !== 0) {
             api_json(false, "Import failed:\n" . implode("\n", $out));
         }
-        exec('rsync -a --delete --exclude="S.*" --exclude="*.lock" --exclude=".#lk*" /root/.gnupg/ ' . escapeshellarg($FLASH_GPG) . '/ 2>&1');
-        api_json(true, "Key imported.\n" . implode("\n", $out));
+        [$snap_ok, $snap_msg] = run_snapshot('key imported');
+        $note = $snap_ok ? '' : "\n\nWARNING — snapshot to flash failed:\n$snap_msg";
+        api_json(true, "Key imported.\n" . implode("\n", $out) . $note);
         break;
 
     case 'backup':
-        @mkdir($FLASH_GPG, 0700, true);
-        exec('rsync -a --delete --exclude="S.*" --exclude="*.lock" --exclude=".#lk*" /root/.gnupg/ ' . escapeshellarg($FLASH_GPG) . '/ 2>&1', $out, $rc);
-        api_json($rc === 0, $rc === 0 ? 'Keyring backed up to flash.' : "Backup failed:\n" . implode("\n", $out));
+        $force = ($_POST['force'] ?? '') === '1';
+        [$ok, $msg] = run_snapshot('manual', $force);
+        api_json($ok, $msg !== '' ? $msg : ($ok ? 'Keyring snapshot written to flash.' : 'Snapshot failed.'));
         break;
 
     case 'restore':
-        if (!is_dir($FLASH_GPG)) {
+        // Explicit user action, so --force: overwrite whatever is in RAM. The
+        // helper still stashes the current keyring under /root first.
+        $file = basename(trim($_POST['file'] ?? ''));
+        $args = ' restore --force';
+        if ($file !== '' && $file !== '.' && $file !== '..') {
+            if (!preg_match('/^gnupg-[0-9]{8}-[0-9]{6}\.tar\.gz$/', $file)) {
+                api_json(false, 'Invalid snapshot name.');
+            }
+            if (!is_file("$SNAP_DIR/$file")) {
+                api_json(false, "Snapshot not found: $file");
+            }
+            $args .= ' --from ' . escapeshellarg($file);
+        } elseif (empty(snapshot_list()) && !is_dir($FLASH_GPG)) {
             api_json(false, 'No backup found on flash.');
         }
-        exec('rsync -a --exclude="S.*" --exclude="*.lock" --exclude=".#lk*" ' . escapeshellarg($FLASH_GPG) . '/ /root/.gnupg/ 2>&1', $out, $rc);
-        api_json($rc === 0, $rc === 0 ? 'Keyring restored from flash.' : "Restore failed:\n" . implode("\n", $out));
+        if (!is_executable($BACKUP_SH)) {
+            api_json(false, 'Backup helper not installed.');
+        }
+        exec(escapeshellarg($BACKUP_SH) . $args . ' 2>&1', $out, $rc);
+        api_json($rc === 0, implode("\n", $out) ?: ($rc === 0 ? 'Keyring restored from flash.' : 'Restore failed.'));
         break;
 
     default:
