@@ -1,0 +1,1393 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name       "gnupg2">
+  <!ENTITY version    "2026.07.28">
+  <!ENTITY plugin_dir "/boot/config/plugins/gnupg2">
+]>
+<PLUGIN name="&name;"
+        version="&version;"
+        pluginURL="https://raw.githubusercontent.com/fonix232/network-tools/main/plugins/gnupg2.plg"
+        support="https://github.com/fonix232/network-tools/issues"
+        min="6.10.0">
+
+<CHANGES>
+### 2026.07.28
+- Downloads gnupg2 + dependencies from Slackware mirror to /boot/extra
+- Web UI for package updates and GPG key management
+- Keyring mirrored to flash on array stop and restored on array start
+- Every write to the flash backup snapshots it first, into
+  /boot/config/gnupg-backups, so the previous contents survive a bad mirror
+- Daily scheduled snapshot in addition to the array-stop backup
+- Restores reassert 0700/0600 permissions lost to vfat, and can pull from any
+  retained snapshot
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# gnupg2 plugin — keyring mirror + snapshot helper
+# Installed to: /usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh
+#
+# The flash mirror is unchanged from the original design:
+#
+#     rsync -a --delete /root/.gnupg/ /boot/config/gnupg/   (backup)
+#     rsync -a          /boot/config/gnupg/ /root/.gnupg/    (restore on boot)
+#
+# What was missing is history. /root is tmpfs, so the RAM keyring starts empty
+# on every boot; anything that emptied or damaged it got mirrored onto the only
+# copy on flash, with --delete removing the private keys there too. There was
+# one copy and no way back.
+#
+# So: every path that writes to /boot/config/gnupg snapshots it *first*. The
+# snapshot captures the last known-good backup as it exists on flash, before
+# the mirror is allowed to overwrite it. If the mirror then wipes itself, the
+# pre-wipe state is still sitting in /boot/config/gnupg-backups.
+#
+# Usage:
+#   gnupg2-backup.sh backup   [--reason TEXT]      # snapshot flash, then mirror
+#   gnupg2-backup.sh snapshot [--force] [--reason TEXT]
+#   gnupg2-backup.sh restore  [--from FILE]        # mirror (or snapshot) -> RAM
+#   gnupg2-backup.sh list     [--json]
+#   gnupg2-backup.sh prune
+#
+# Exit codes: 0 ok / nothing to do, 1 error.
+
+set -o pipefail
+
+GNUPGHOME="${GNUPGHOME:-/root/.gnupg}"
+export GNUPGHOME
+
+# Overridable so the paths can be pointed elsewhere for testing.
+FLASH_GPG="${GNUPG2_FLASH_DIR:-/boot/config/gnupg}"        # the live mirror
+SNAP_DIR="${GNUPG2_SNAP_DIR:-/boot/config/gnupg-backups}"  # history of the mirror
+KEEP="${GNUPG2_KEEP_SNAPSHOTS:-10}"
+
+# Runtime cruft that must never be mirrored or archived: agent sockets,
+# dotlocks, and the RNG seed.
+RSYNC_EXCLUDES=(--exclude='S.*' --exclude='*.lock' --exclude='.#lk*' --exclude='random_seed')
+TAR_EXCLUDES=(--exclude=./S.* --exclude=*.lock --exclude=.#lk* --exclude=./random_seed)
+
+log()  { echo "gnupg2: $*"; logger -t gnupg2 -- "$*" 2>/dev/null; }
+warn() { echo "gnupg2: WARNING — $*" >&2; logger -t gnupg2 -p user.warning -- "WARNING: $*" 2>/dev/null; }
+err()  { echo "gnupg2: ERROR — $*" >&2; logger -t gnupg2 -p user.err -- "ERROR: $*" 2>/dev/null; }
+
+# --- helpers ---------------------------------------------------------------
+
+# Stop the daemons holding the keyring open. keyboxd keeps public-keys.d as a
+# live sqlite database; copying it underneath a running daemon can capture a
+# torn file or a database without its write-ahead log. They restart on demand.
+quiesce() {
+    gpgconf --kill all >/dev/null 2>&1 || true
+    sync
+}
+
+dir_secret_count() {
+    local dir="$1"
+    [ -d "$dir/private-keys-v1.d" ] || { echo 0; return; }
+    find "$dir/private-keys-v1.d" -maxdepth 1 -type f -name '*.key' 2>/dev/null | wc -l
+}
+
+snapshot_secret_count() {
+    local snap="$1"
+    local meta="${snap%.tar.gz}.meta"
+    if [ -f "$meta" ]; then
+        local n
+        n=$(sed -n 's/^secrets=//p' "$meta" | head -1)
+        if [ -n "$n" ]; then echo "$n"; return; fi
+    fi
+    tar -tzf "$snap" 2>/dev/null | grep -c 'private-keys-v1\.d/.*\.key$'
+}
+
+snapshot_meta_field() {
+    local snap="$1" field="$2"
+    local meta="${snap%.tar.gz}.meta"
+    [ -f "$meta" ] && sed -n "s/^${field}=//p" "$meta" | head -1
+}
+
+snapshot_list() {
+    [ -d "$SNAP_DIR" ] || return 0
+    find "$SNAP_DIR" -maxdepth 1 -type f -name 'gnupg-*.tar.gz' 2>/dev/null | sort -r
+}
+
+newest_snapshot() { snapshot_list | head -1; }
+
+# Content identity of the flash mirror, used to skip writing an identical
+# snapshot every time — flash sticks have a finite number of writes in them.
+flash_fingerprint() {
+    [ -d "$FLASH_GPG" ] || { echo "-"; return; }
+    ( cd "$FLASH_GPG" && find . -type f \
+        ! -name 'S.*' ! -name '*.lock' ! -name '.#lk*' ! -name 'random_seed' \
+        -print0 2>/dev/null | sort -z | xargs -0 -r md5sum 2>/dev/null ) \
+        | md5sum | cut -d' ' -f1
+}
+
+# --- snapshot: archive the flash mirror as it stands right now --------------
+
+cmd_snapshot() {
+    local force=0 reason="manual"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force)  force=1 ;;
+            --reason) shift; reason="${1:-manual}" ;;
+        esac
+        shift
+    done
+
+    if [ ! -d "$FLASH_GPG" ] || [ -z "$(ls -A "$FLASH_GPG" 2>/dev/null)" ]; then
+        log "no existing flash backup at $FLASH_GPG, nothing to snapshot"
+        return 0
+    fi
+
+    mkdir -p "$SNAP_DIR" || { err "cannot create $SNAP_DIR (is the flash drive mounted?)"; return 1; }
+
+    local fp newest secrets
+    fp=$(flash_fingerprint)
+    newest=$(newest_snapshot)
+
+    if [ "$force" -ne 1 ] && [ -n "$newest" ] && [ "$fp" = "$(snapshot_meta_field "$newest" fingerprint)" ]; then
+        log "flash backup unchanged since $(basename "$newest"), skipping snapshot"
+        return 0
+    fi
+
+    secrets=$(dir_secret_count "$FLASH_GPG")
+
+    local stamp tmp dest
+    stamp=$(date +%Y%m%d-%H%M%S)
+    dest="$SNAP_DIR/gnupg-$stamp.tar.gz"
+    tmp="$SNAP_DIR/.tmp-$$.tar.gz"
+
+    # tar rather than a second directory tree: the flash is vfat, which has no
+    # ownership or permission bits, so a tarball is both the only way to carry
+    # the modes across and a single file that either lands whole or not at all.
+    if ! tar -czf "$tmp" "${TAR_EXCLUDES[@]}" -C "$FLASH_GPG" . 2>/dev/null; then
+        rm -f "$tmp"
+        err "snapshot failed while creating archive"
+        return 1
+    fi
+
+    if ! tar -tzf "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        err "snapshot failed verification, discarded (flash full or failing?)"
+        return 1
+    fi
+
+    if ! mv -f "$tmp" "$dest"; then
+        rm -f "$tmp"
+        err "could not write snapshot to $SNAP_DIR"
+        return 1
+    fi
+
+    {
+        echo "created=$(date -Iseconds)"
+        echo "secrets=$secrets"
+        echo "fingerprint=$fp"
+        echo "reason=$reason"
+    } > "${dest%.tar.gz}.meta"
+    sync
+
+    log "snapshot $(basename "$dest") written ($secrets secret key(s), reason: $reason)"
+    cmd_prune
+    return 0
+}
+
+# --- backup: snapshot the mirror, then refresh it from RAM ------------------
+
+cmd_backup() {
+    local reason="manual"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --reason) shift; reason="${1:-manual}" ;;
+            --force)  ;;   # accepted for compatibility; the mirror always refreshes
+        esac
+        shift
+    done
+
+    if [ ! -d "$GNUPGHOME" ]; then
+        log "no keyring at $GNUPGHOME, leaving the flash backup alone"
+        return 0
+    fi
+
+    # Always before touching the mirror. This is the whole point: whatever the
+    # mirror does next, its current contents are preserved.
+    cmd_snapshot --reason "$reason" || warn "could not snapshot the flash backup before updating it"
+
+    local live flash
+    live=$(dir_secret_count "$GNUPGHOME")
+    flash=$(dir_secret_count "$FLASH_GPG")
+    if [ "$live" -lt "$flash" ]; then
+        warn "live keyring has $live secret key(s), flash backup has $flash — the mirror is about to drop $((flash - live))."
+        warn "The pre-update state is preserved in $SNAP_DIR; restore with:"
+        warn "  /usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh restore --from <snapshot>"
+    fi
+
+    quiesce
+    mkdir -p "$FLASH_GPG" || { err "cannot create $FLASH_GPG"; return 1; }
+
+    rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$GNUPGHOME/" "$FLASH_GPG/"
+    local rc=$?
+    sync
+
+    # vfat cannot represent ownership, permissions or symlinks, so rsync -a
+    # reports partial-transfer (23) or vanished-file (24) on every run here.
+    # That is expected; anything else is a real failure. The old code ignored
+    # the exit code entirely and always claimed success.
+    case "$rc" in
+        0)     log "flash backup updated ($live secret key(s))" ;;
+        23|24) log "flash backup updated ($live secret key(s); rsync rc=$rc, expected on vfat)" ;;
+        *)     err "flash backup failed (rsync rc=$rc)"; return 1 ;;
+    esac
+    return 0
+}
+
+# --- restore ---------------------------------------------------------------
+
+cmd_restore() {
+    local from=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)  shift; from="${1:-}" ;;
+            --force) ;;   # accepted for compatibility
+        esac
+        shift
+    done
+
+    local src=""
+    if [ -n "$from" ]; then
+        case "$from" in
+            */*) err "invalid snapshot name"; return 1 ;;
+        esac
+        src="$SNAP_DIR/$from"
+        [ -f "$src" ] || { err "snapshot not found: $from"; return 1; }
+        tar -tzf "$src" >/dev/null 2>&1 || { err "snapshot $from is unreadable"; return 1; }
+    elif [ ! -d "$FLASH_GPG" ]; then
+        log "no keyring backup found on flash"
+        return 0
+    fi
+
+    mkdir -p "$GNUPGHOME" || { err "cannot create $GNUPGHOME"; return 1; }
+    chmod 700 "$GNUPGHOME"
+
+    quiesce
+
+    # /root is tmpfs, so this costs nothing and gives an undo if the wrong
+    # source was picked.
+    if [ -n "$(ls -A "$GNUPGHOME" 2>/dev/null)" ]; then
+        local safety="${GNUPGHOME}.pre-restore-$(date +%Y%m%d-%H%M%S)"
+        cp -a "$GNUPGHOME" "$safety" 2>/dev/null && log "current keyring saved to $safety"
+    fi
+
+    # Both paths merge rather than replace, so anything created since the
+    # backup survives the restore.
+    if [ -n "$src" ]; then
+        if ! tar -xzf "$src" -C "$GNUPGHOME" 2>/dev/null; then
+            err "restore from $(basename "$src") failed"
+            return 1
+        fi
+        log "restored keyring from snapshot $(basename "$src")"
+    else
+        rsync -a "${RSYNC_EXCLUDES[@]}" "$FLASH_GPG/" "$GNUPGHOME/"
+        local rc=$?
+        case "$rc" in
+            0|23|24) log "restored keyring from flash" ;;
+            *)       err "restore from flash failed (rsync rc=$rc)"; return 1 ;;
+        esac
+    fi
+
+    # vfat reports every file as world-readable, and rsync -a carries those
+    # modes straight into the keyring. gpg-agent refuses to use a
+    # private-keys-v1.d it considers unsafe, so reassert the modes ourselves.
+    find "$GNUPGHOME" -type d -exec chmod 700 {} + 2>/dev/null
+    find "$GNUPGHOME" -type f -exec chmod 600 {} + 2>/dev/null
+    # Stale dotlocks would block gpg-agent and keyboxd from starting again.
+    find "$GNUPGHOME" \( -name '*.lock' -o -name '.#lk*' \) -type f -delete 2>/dev/null
+
+    gpgconf --kill all >/dev/null 2>&1 || true
+    gpg --batch --list-keys >/dev/null 2>&1 || true
+
+    local now
+    now=$(dir_secret_count "$GNUPGHOME")
+    log "keyring now holds $now secret key(s)"
+
+    # Came up with no secret keys but a snapshot has some: the mirror was very
+    # likely overwritten by an empty keyring. Say so rather than restoring
+    # automatically — silently resurrecting keys would fight a deliberate
+    # deletion, and this is recoverable in one command.
+    if [ "$now" -eq 0 ] && [ -z "$src" ]; then
+        local best
+        best=$(newest_snapshot)
+        if [ -n "$best" ] && [ "$(snapshot_secret_count "$best")" -gt 0 ] 2>/dev/null; then
+            warn "the flash backup holds no secret keys, but snapshot $(basename "$best") has $(snapshot_secret_count "$best")."
+            warn "If this was not intentional, recover with:"
+            warn "  $0 restore --from $(basename "$best")"
+        fi
+    fi
+    return 0
+}
+
+# --- prune -----------------------------------------------------------------
+
+cmd_prune() {
+    local snaps keep_secret n=0
+    mapfile -t snaps < <(snapshot_list)
+    [ "${#snaps[@]}" -le "$KEEP" ] && return 0
+
+    # Never drop the most recent snapshot that actually contains secret keys,
+    # even if it has aged out of the retention window.
+    keep_secret=""
+    for s in "${snaps[@]}"; do
+        if [ "$(snapshot_secret_count "$s")" -gt 0 ] 2>/dev/null; then keep_secret="$s"; break; fi
+    done
+
+    for s in "${snaps[@]}"; do
+        n=$((n + 1))
+        [ "$n" -le "$KEEP" ] && continue
+        [ "$s" = "$keep_secret" ] && continue
+        rm -f "$s" "${s%.tar.gz}.meta"
+        log "pruned old snapshot $(basename "$s")"
+    done
+    sync
+    return 0
+}
+
+# --- list ------------------------------------------------------------------
+
+cmd_list() {
+    if [ "${1:-}" = "--json" ]; then
+        local first=1
+        printf '['
+        while read -r s; do
+            [ -n "$s" ] || continue
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"file":"%s","created":"%s","secrets":%s,"reason":"%s","size":%s}' \
+                "$(basename "$s")" \
+                "$(snapshot_meta_field "$s" created)" \
+                "$(snapshot_secret_count "$s")" \
+                "$(snapshot_meta_field "$s" reason | tr -d '"\\')" \
+                "$(stat -c %s "$s" 2>/dev/null || echo 0)"
+        done < <(snapshot_list)
+        printf ']\n'
+        return 0
+    fi
+
+    local any=0
+    while read -r s; do
+        [ -n "$s" ] || continue
+        any=1
+        printf '%s  %s  %s secret key(s)  %s\n' \
+            "$(basename "$s")" \
+            "$(snapshot_meta_field "$s" created)" \
+            "$(snapshot_secret_count "$s")" \
+            "$(snapshot_meta_field "$s" reason)"
+    done < <(snapshot_list)
+    [ "$any" -eq 0 ] && echo "no snapshots in $SNAP_DIR"
+    return 0
+}
+
+# --- dispatch --------------------------------------------------------------
+
+case "${1:-}" in
+    backup)   shift; cmd_backup   "$@" ;;
+    snapshot) shift; cmd_snapshot "$@" ;;
+    restore)  shift; cmd_restore  "$@" ;;
+    list)     shift; cmd_list     "$@" ;;
+    prune)    shift; cmd_prune    "$@" ;;
+    *)
+        echo "usage: $(basename "$0") {backup [--reason TEXT]|snapshot [--force] [--reason TEXT]|restore [--from FILE]|list [--json]|prune}" >&2
+        exit 1
+        ;;
+esac
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/event/started" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# gnupg2 plugin — array start hook
+# Restore GPG keyring from flash to RAM (/root is tmpfs and starts empty).
+
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
+CRON_DIR="/boot/config/plugins/gnupg2"
+
+[ -x "$BACKUP_SH" ] || { echo "gnupg2: backup helper missing, cannot restore keyring"; exit 0; }
+
+"$BACKUP_SH" restore
+
+# /etc is tmpfs, so the daily snapshot job has to be (re)registered every boot.
+# Without it the only backup trigger is array stop, which on a box that stays up
+# for months means no recovery points at all.
+mkdir -p "$CRON_DIR"
+cat > "$CRON_DIR/gnupg2.cron" <<'CRON'
+# Daily GPG keyring snapshot to flash (gnupg2 plugin)
+40 4 * * * /usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh backup --reason scheduled &>/dev/null
+CRON
+if command -v update_cron >/dev/null 2>&1; then
+    update_cron
+fi
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/event/stopping_svcs" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# gnupg2 plugin — shutdown hook
+# Snapshot the existing flash backup, then mirror the RAM keyring onto it.
+#
+# The snapshot happens first, so even if the RAM keyring is empty or damaged by
+# the time we get here, the last good flash backup is preserved before the
+# mirror overwrites it.
+
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
+
+[ -x "$BACKUP_SH" ] || { echo "gnupg2: backup helper missing, skipping keyring backup"; exit 0; }
+
+"$BACKUP_SH" backup --reason "array stop" || echo "gnupg2: keyring backup reported a problem — check the syslog"
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/gnupg2.page" Mode="0644">
+<INLINE>
+<![CDATA[
+Menu="Utilities"
+Title="GnuPG"
+Icon="lock"
+Tag="key"
+---
+<?php
+/*
+ * gnupg2 -- UnRaid management page
+ * IMPORTANT: PHP-included inside emhttp. No header(), exit(), die().
+ * No remote HTTP from PHP. All mutations via api.php fetch().
+ */
+
+function gp_h(string $s): string {
+    return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
+}
+
+// Installed package versions
+$gp_packages = [];
+$gp_pkg_names = ['gnupg2', 'libassuan', 'libksba', 'npth'];
+foreach ($gp_pkg_names as $pn) {
+    $matches = glob("/var/lib/pkgtools/packages/$pn-*");
+    $ver = '';
+    foreach ($matches as $m) {
+        if (preg_match('/^' . preg_quote($pn, '/') . '-([^-]+-[^-]+-[^-]+)$/', basename($m), $hit)) {
+            $ver = $hit[1];
+        }
+    }
+    $gp_packages[] = ['name' => $pn, 'version' => $ver];
+}
+
+$gp_gpg_ver = '';
+exec('gpg --version 2>/dev/null | head -1', $gp_ver_out);
+$gp_gpg_ver = implode('', $gp_ver_out);
+
+$gp_snap_dir = '/boot/config/gnupg-backups';
+$gp_flash_dir = '/boot/config/gnupg';
+$gp_snap_count = count(glob("$gp_snap_dir/gnupg-*.tar.gz") ?: []);
+$gp_legacy_ok = is_dir($gp_flash_dir);
+?>
+
+<style>
+.gp-section { margin-bottom: 24px; }
+.gp-table { border-collapse: collapse; width: auto; min-width: 400px; }
+.gp-table th, .gp-table td { padding: 6px 14px; text-align: left; border-bottom: 1px solid #333; }
+.gp-table th { font-weight: bold; }
+.gp-key-fpr { font-family: monospace; font-size: 0.85em; }
+.gp-badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; }
+.gp-badge-ok { background: #2d5f2d; color: #cfc; }
+.gp-badge-warn { background: #5f4f2d; color: #fec; }
+.gp-badge-none { background: #444; color: #aaa; }
+.gp-actions { margin-top: 8px; }
+.gp-cap-badge { display:inline-block; width:1.4em; text-align:center; border-radius:3px; font-size:0.8em; font-weight:bold; font-family:monospace; padding:1px 0; margin-right:2px; }
+.gp-cap-s { background:#1e3a7f; color:#adf; }
+.gp-cap-c { background:#4a2d8f; color:#ccf; }
+.gp-cap-e { background:#1e5f2d; color:#cfc; }
+.gp-cap-a { background:#7f4f1e; color:#fec; }
+#gp-import-box { display: none; margin-top: 12px; }
+#gp-import-box textarea { width: 100%; max-width: 600px; height: 120px; font-family: monospace; font-size: 0.85em; }
+#gp-export-box { display: none; margin-top: 12px; }
+#gp-export-box textarea { width: 100%; max-width: 600px; height: 160px; font-family: monospace; font-size: 0.85em; }
+</style>
+
+<script>
+var GP_API = '/plugins/gnupg2/api.php';
+function gpCsrf() { return (typeof csrf_token !== 'undefined') ? csrf_token : ''; }
+
+function gpFlash(ok, msg) {
+    var el = document.getElementById('gp-flash');
+    if (!el) {
+        el = document.createElement('div'); el.id = 'gp-flash';
+        var first = document.querySelector('.title');
+        if (first) first.parentNode.insertBefore(el, first);
+        else document.body.insertBefore(el, document.body.firstChild);
+    }
+    el.className = 'notice ' + (ok ? 'notice-green' : 'notice-red');
+    el.innerHTML = '<pre style="margin:0;white-space:pre-wrap">' + String(msg).replace(/</g, '&lt;') + '</pre>';
+    el.scrollIntoView({behavior: 'smooth'});
+}
+
+function gpCall(data, btn, noReload) {
+    var orig = btn ? btn.value : null;
+    if (btn) { btn.disabled = true; btn.value = 'Working\u2026'; }
+    var payload = Object.assign({}, data, {csrf_token: gpCsrf()});
+    return fetch(GP_API, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        if (btn) { btn.disabled = false; btn.value = orig; }
+        gpFlash(j.ok, j.msg || '');
+        if (j.ok && !noReload) setTimeout(function() { location.reload(); }, 800);
+        return j;
+    })
+    .catch(function(e) {
+        if (btn) { btn.disabled = false; btn.value = orig; }
+        gpFlash(false, 'Request failed: ' + e);
+    });
+}
+
+function gpCheckUpdates(btn) {
+    var orig = btn.value; btn.disabled = true; btn.value = 'Checking\u2026';
+    fetch(GP_API + '?action=check_updates')
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        btn.disabled = false; btn.value = orig;
+        if (!j.ok) { gpFlash(false, j.msg || 'Failed to check updates.'); return; }
+
+        var updates = [];
+        var tbody = document.getElementById('gp-pkg-body');
+        j.packages.forEach(function(p) {
+            // Find matching row
+            var cells = tbody.querySelectorAll('tr');
+            cells.forEach(function(row) {
+                if (row.cells[0] && row.cells[0].textContent.trim() === p.name) {
+                    var avail = p.filename.replace(p.name + '-', '').replace('.txz', '');
+                    row.cells[2].textContent = avail;
+                    if (avail !== p.installed) {
+                        row.cells[2].style.color = '#fc3';
+                        updates.push(p.name);
+                    } else {
+                        row.cells[2].style.color = '#8f8';
+                    }
+                }
+            });
+        });
+
+        if (updates.length > 0) {
+            gpFlash(false, 'Updates available for: ' + updates.join(', '));
+            document.getElementById('gp-update-btn').style.display = '';
+        } else {
+            gpFlash(true, 'All packages are up to date.');
+        }
+    })
+    .catch(function(e) { btn.disabled = false; btn.value = orig; gpFlash(false, 'Failed: ' + e); });
+}
+
+function gpInstallPackages(btn) {
+    gpCall({action: 'install_packages'}, btn);
+}
+
+function gpAlgoName(algo, bits) {
+    var m = {'1':'RSA','17':'DSA','18':'ECDH','19':'ECDSA','22':'EdDSA'};
+    var n = m[String(algo)] || ('Algo' + algo);
+    if (n === 'EdDSA' && String(bits) === '255') return 'ed25519';
+    if (n === 'ECDH'  && String(bits) === '255') return 'cv25519';
+    if (n === 'RSA') return 'RSA-' + bits;
+    if ((n === 'ECDSA' || n === 'ECDH') && bits) return n + '-' + bits;
+    return n;
+}
+
+function gpCapsBadges(caps) {
+    if (!caps) return '<span style="color:#888">&mdash;</span>';
+    var lower = caps.toLowerCase();
+    var out = '';
+    if (lower.indexOf('s') !== -1) out += '<span class="gp-cap-badge gp-cap-s" title="Sign">S</span>';
+    if (lower.indexOf('c') !== -1) out += '<span class="gp-cap-badge gp-cap-c" title="Certify">C</span>';
+    if (lower.indexOf('e') !== -1) out += '<span class="gp-cap-badge gp-cap-e" title="Encrypt">E</span>';
+    if (lower.indexOf('a') !== -1) out += '<span class="gp-cap-badge gp-cap-a" title="Authenticate">A</span>';
+    return out || '<span style="color:#888">&mdash;</span>';
+}
+
+function gpGenerateKey(btn) {
+    var name = document.getElementById('gp-gen-name').value.trim();
+    var email = document.getElementById('gp-gen-email').value.trim();
+    if (!name) { gpFlash(false, 'Name is required.'); return; }
+    var algo = document.getElementById('gp-gen-algo').value;
+    var usages = ['cert'];
+    if (document.getElementById('gp-gen-sign').checked) usages.push('sign');
+    if (document.getElementById('gp-gen-auth').checked) usages.push('auth');
+    var encr = document.getElementById('gp-gen-encr').checked ? '1' : '0';
+    gpCall({action: 'generate_key', key_name: name, key_email: email,
+            key_algo: algo, key_usages: usages.join(','), key_encr: encr}, btn);
+}
+
+function gpDeleteKey(fpr, btn) {
+    if (!confirm('Delete key ' + fpr + '? This cannot be undone.')) return;
+    gpCall({action: 'delete_key', fingerprint: fpr}, btn);
+}
+
+function gpExportKey(fpr) {
+    fetch(GP_API + '?action=export_key&fingerprint=' + encodeURIComponent(fpr))
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        if (!j.ok) { gpFlash(false, j.msg || 'Export failed.'); return; }
+        var box = document.getElementById('gp-export-box');
+        document.getElementById('gp-export-text').value = j.armor;
+        box.style.display = '';
+        box.scrollIntoView({behavior: 'smooth'});
+    })
+    .catch(function(e) { gpFlash(false, 'Export failed: ' + e); });
+}
+
+function gpImportKey(btn) {
+    var armor = document.getElementById('gp-import-text').value.trim();
+    if (!armor) { gpFlash(false, 'Paste a PGP public key block.'); return; }
+    gpCall({action: 'import_key', armor: armor}, btn);
+}
+
+function gpRestoreSnapshot(file, btn) {
+    if (!confirm('Restore keyring from ' + file + '?\n\nThis merges the snapshot over the current keyring. The current keyring is stashed under /root first.')) return;
+    gpCall({action: 'restore', file: file}, btn);
+}
+
+function gpHumanSize(n) {
+    n = parseInt(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return (n / 1024 / 1024).toFixed(1) + ' MiB';
+}
+
+function gpRenderSnapshots(snaps) {
+    var table = document.getElementById('gp-snap-table');
+    var empty = document.getElementById('gp-snap-empty');
+    if (!table || !empty) return;
+    if (!snaps || snaps.length === 0) { empty.style.display = ''; return; }
+
+    var rows = snaps.map(function(s) {
+        var esc = function(v) { return String(v == null ? '' : v).replace(/</g, '&lt;'); };
+        var secretBadge = s.secrets > 0
+            ? '<span class="gp-badge gp-badge-ok">' + s.secrets + '</span>'
+            : '<span class="gp-badge gp-badge-warn">0</span>';
+        return '<tr>' +
+            '<td class="gp-key-fpr">' + esc(s.file) + '</td>' +
+            '<td>' + esc((s.created || '').replace('T', ' ').replace(/[+-]\d\d:\d\d$/, '')) + '</td>' +
+            '<td>' + secretBadge + '</td>' +
+            '<td>' + esc(s.reason) + '</td>' +
+            '<td>' + gpHumanSize(s.size) + '</td>' +
+            '<td><input type="button" value="Restore" onclick="gpRestoreSnapshot(\'' + esc(s.file) + '\',this)"></td>' +
+            '</tr>';
+    });
+    document.getElementById('gp-snap-body').innerHTML = rows.join('');
+    table.style.display = '';
+}
+
+function gpToggleImport() {
+    var box = document.getElementById('gp-import-box');
+    box.style.display = box.style.display === 'none' ? '' : 'none';
+}
+</script>
+
+<!-- ======================= PACKAGES ======================= -->
+<div class="title gp-section"><span class="left">GnuPG Packages</span></div>
+<div class="pluginUpdate" style="margin-bottom:20px">
+  <p><?= gp_h($gp_gpg_ver) ?></p>
+  <table class="gp-table">
+    <thead>
+      <tr><th>Package</th><th>Installed</th><th>Available</th></tr>
+    </thead>
+    <tbody id="gp-pkg-body">
+      <?php foreach ($gp_packages as $p): ?>
+      <tr>
+        <td><?= gp_h($p['name']) ?></td>
+        <td><?= $p['version'] ? gp_h($p['version']) : '<span class="gp-badge gp-badge-none">not found</span>' ?></td>
+        <td>&mdash;</td>
+      </tr>
+      <?php endforeach; ?>
+    </tbody>
+  </table>
+  <div class="gp-actions">
+    <input type="button" value="Check for updates" onclick="gpCheckUpdates(this)">
+    <input type="button" value="Download &amp; install all" id="gp-update-btn" style="display:none" onclick="gpInstallPackages(this)">
+  </div>
+</div>
+
+<!-- ======================= GPG KEYS ======================= -->
+<div class="title gp-section"><span class="left">GPG Keys</span></div>
+<div class="pluginUpdate" style="margin-bottom:20px">
+  <div id="gp-keys-loading">Loading keys&hellip;</div>
+  <table class="gp-table" id="gp-keys-table" style="display:none">
+    <thead>
+      <tr><th>UID</th><th>Fingerprint</th><th>Algorithm</th><th>Capabilities</th><th>Created</th><th>Type</th><th></th></tr>
+    </thead>
+    <tbody id="gp-keys-body"></tbody>
+  </table>
+  <div class="gp-actions">
+    <input type="button" value="Import key" onclick="gpToggleImport()">
+  </div>
+  <div id="gp-import-box">
+    <p>Paste an ASCII-armored PGP public key:</p>
+    <textarea id="gp-import-text" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"></textarea>
+    <br>
+    <input type="button" value="Import" onclick="gpImportKey(this)">
+  </div>
+  <div id="gp-export-box">
+    <p>Exported public key:</p>
+    <textarea id="gp-export-text" readonly></textarea>
+  </div>
+
+  <hr style="border-color:#444; margin:16px 0">
+  <p><strong>Generate new key</strong></p>
+  <table style="border:none;border-collapse:collapse;margin-bottom:8px">
+    <tr>
+      <td style="padding:4px 8px 4px 0">Name</td>
+      <td><input type="text" id="gp-gen-name" style="width:16em" placeholder="e.g. <?= gp_h(strtolower(gethostname())) ?>"></td>
+      <td style="padding:4px 8px">Email</td>
+      <td><input type="text" id="gp-gen-email" style="width:18em" placeholder="e.g. <?= gp_h(strtolower(gethostname())) ?>@example.com (optional)"></td>
+    </tr>
+    <tr>
+      <td style="padding:4px 8px 4px 0">Algorithm</td>
+      <td>
+        <select id="gp-gen-algo">
+          <option value="ed25519" selected>ed25519 (recommended)</option>
+          <option value="rsa4096">RSA 4096</option>
+          <option value="rsa2048">RSA 2048</option>
+          <option value="nistp256">NIST P-256</option>
+          <option value="nistp384">NIST P-384</option>
+          <option value="nistp521">NIST P-521</option>
+        </select>
+      </td>
+      <td style="padding:4px 8px">Capabilities</td>
+      <td>
+        <label style="margin-right:10px"><input type="checkbox" checked disabled> cert (always)</label>
+        <label style="margin-right:10px"><input type="checkbox" id="gp-gen-sign" checked> sign</label>
+        <label style="margin-right:10px"><input type="checkbox" id="gp-gen-auth"> auth</label>
+        <label><input type="checkbox" id="gp-gen-encr" checked> add encryption subkey</label>
+      </td>
+    </tr>
+  </table>
+  <input type="button" value="Generate" onclick="gpGenerateKey(this)">
+  <p style="font-size:0.85em;margin-top:6px">No passphrase, no expiry. The encryption subkey algorithm is automatically paired with the primary key algorithm.</p>
+</div>
+
+<!-- ======================= BACKUP ======================= -->
+<div class="title gp-section"><span class="left">Keyring Backup</span></div>
+<div class="pluginUpdate" style="margin-bottom:20px">
+  <p>
+    Flash backup: <?= $gp_legacy_ok
+        ? '<span class="gp-badge gp-badge-ok">present</span> at <code>' . gp_h($gp_flash_dir) . '/</code>'
+        : '<span class="gp-badge gp-badge-warn">not found</span>' ?>
+    &nbsp;Snapshots: <?= $gp_snap_count > 0
+        ? '<span class="gp-badge gp-badge-ok">' . (int) $gp_snap_count . '</span> in <code>' . gp_h($gp_snap_dir) . '/</code>'
+        : '<span class="gp-badge gp-badge-warn">none yet</span>' ?>
+  </p>
+  <p style="font-size:0.85em">
+    The keyring is mirrored to flash on array stop and restored on array start,
+    as before. Every write to the flash backup now takes a snapshot of it first,
+    so the previous contents survive even if the mirror overwrites itself with an
+    empty keyring. Snapshots are also taken daily at 04:40 and whenever a key is
+    added or removed. Identical snapshots are skipped, and the most recent
+    <?= (int) 10 ?> are kept.
+  </p>
+  <p style="font-size:0.85em;color:#c99">
+    Secret keys are stored unencrypted on the flash drive. Anyone with the flash
+    device, or a copy of a flash backup <code>.zip</code>, has your private keys.
+  </p>
+  <table class="gp-table" id="gp-snap-table" style="display:none">
+    <thead>
+      <tr><th>Snapshot</th><th>Taken</th><th>Secret keys</th><th>Reason</th><th>Size</th><th></th></tr>
+    </thead>
+    <tbody id="gp-snap-body"></tbody>
+  </table>
+  <div id="gp-snap-empty" style="color:#888;display:none">No snapshots on flash yet.</div>
+  <div class="gp-actions">
+    <input type="button" value="Backup now" onclick="gpCall({action:'backup'},this)">
+    <input type="button" value="Restore from flash" onclick="if(confirm('Restore the keyring from the flash backup? The current keyring is stashed under /root first.'))gpCall({action:'restore'},this)">
+  </div>
+</div>
+
+<script>
+// Load keys on page load
+(function() {
+    fetch(GP_API + '?action=status')
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        document.getElementById('gp-keys-loading').style.display = 'none';
+        if (!j.ok) return;
+        gpRenderSnapshots(j.snapshots);
+        if (!j.keys) return;
+        var tbody = document.getElementById('gp-keys-body');
+        document.getElementById('gp-keys-table').style.display = '';
+        if (j.keys.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="color:#888">No keys found.</td></tr>';
+            return;
+        }
+        j.keys.forEach(function(k) {
+            var fprShort = k.fpr.substring(k.fpr.length - 16);
+            var created = k.created ? new Date(parseInt(k.created) * 1000).toISOString().split('T')[0] : '';
+            var type = k.secret
+                ? '<span class="gp-badge gp-badge-ok">sec+pub</span>'
+                : '<span class="gp-badge gp-badge-none">pub</span>';
+            var row = '<tr>' +
+                '<td>' + (k.uid || '').replace(/</g, '&lt;') + '</td>' +
+                '<td class="gp-key-fpr" title="' + k.fpr + '">' + fprShort + '</td>' +
+                '<td>' + gpAlgoName(k.algo, k.bits) + '</td>' +
+                '<td>' + gpCapsBadges(k.caps) + '</td>' +
+                '<td>' + created + '</td>' +
+                '<td>' + type + '</td>' +
+                '<td>' +
+                    '<input type="button" value="Export" onclick="gpExportKey(\'' + k.fpr + '\')" style="margin-right:4px">' +
+                    '<input type="button" value="Delete" onclick="gpDeleteKey(\'' + k.fpr + '\',this)">' +
+                '</td>' +
+                '</tr>';
+            tbody.innerHTML += row;
+        });
+    })
+    .catch(function(e) {
+        document.getElementById('gp-keys-loading').textContent = 'Failed to load keys: ' + e;
+    });
+})();
+</script>
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/gnupg2/api.php" Mode="0644">
+<INLINE>
+<![CDATA[
+<?php
+/*
+ * gnupg2 -- API endpoint
+ * Installed to: /usr/local/emhttp/plugins/gnupg2/api.php
+ *
+ * Called via AJAX from the management page.
+ * Returns JSON: { "ok": bool, ... }
+ */
+
+header('Content-Type: application/json');
+
+$FLASH_GPG  = '/boot/config/gnupg';           // legacy mirror — read-only fallback
+$SNAP_DIR   = '/boot/config/gnupg-backups';   // versioned snapshots
+$BACKUP_SH  = '/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh';
+$GPG_HOME   = '/root/.gnupg';
+$EXTRA_DIR  = '/boot/extra';
+$PKG_DB     = '/var/lib/pkgtools/packages';
+$PACKAGES   = ['gnupg2', 'libassuan', 'libksba', 'npth'];
+
+function api_json(bool $ok, string $msg): void {
+    echo json_encode(['ok' => $ok, 'msg' => $msg]);
+    if (ob_get_level()) ob_end_flush();
+    flush();
+    exit;
+}
+
+/**
+ * emhttp does not necessarily run with HOME=/root, so pin GNUPGHOME rather than
+ * letting gpg guess — otherwise the web UI can end up managing a different
+ * keyring than the boot-time restore does.
+ */
+function gpg_cmd(string $args): string {
+    global $GPG_HOME;
+    return 'GNUPGHOME=' . escapeshellarg($GPG_HOME) . ' gpg ' . $args;
+}
+
+/**
+ * Update the flash backup via the shared helper. The helper snapshots the
+ * existing flash backup before the mirror touches it, so callers do not need to
+ * take their own precautions before destructive operations.
+ */
+function run_backup(string $reason): array {
+    global $BACKUP_SH;
+    if (!is_executable($BACKUP_SH)) {
+        return [false, 'Backup helper not installed; flash backup was NOT updated.'];
+    }
+    $cmd = escapeshellarg($BACKUP_SH) . ' backup --reason ' . escapeshellarg($reason) . ' 2>&1';
+    exec($cmd, $out, $rc);
+    return [$rc === 0, implode("\n", $out)];
+}
+
+function snapshot_list(): array {
+    global $BACKUP_SH;
+    if (!is_executable($BACKUP_SH)) return [];
+    exec(escapeshellarg($BACKUP_SH) . ' list --json 2>/dev/null', $out, $rc);
+    if ($rc !== 0) return [];
+    $parsed = json_decode(implode('', $out), true);
+    return is_array($parsed) ? $parsed : [];
+}
+
+function installed_version(string $name): string {
+    global $PKG_DB;
+    $matches = glob("$PKG_DB/$name-*");
+    foreach ($matches as $m) {
+        $base = basename($m);
+        // Slackware package names: name-version-arch-build
+        if (preg_match('/^' . preg_quote($name, '/') . '-([^-]+-[^-]+-[^-]+)$/', $base, $hit)) {
+            return $hit[1];
+        }
+    }
+    return '';
+}
+
+function slackware_mirror(): string {
+    // Detect Slackware version — Unraid 7.x reports "Slackware 15.0+" (trailing +) and tracks -current
+    $ver = trim(@file_get_contents('/etc/slackware-version') ?: '');
+    if (str_contains($ver, '+') || $ver === '') {
+        return 'https://mirrors.slackware.com/slackware/slackware64-current';
+    }
+    if (preg_match('/Slackware\s+([\d.]+)/', $ver, $m)) {
+        return "https://mirrors.slackware.com/slackware/slackware64-{$m[1]}";
+    }
+    return 'https://mirrors.slackware.com/slackware/slackware64-current';
+}
+
+function lookup_package(string $name, string $checksums): ?array {
+    // Find the package path in CHECKSUMS.md5 without assuming category
+    if (!preg_match('#([a-f0-9]+)\s+\./slackware64/([^/]+)/(' . preg_quote($name, '#') . '-[^\s]+\.txz)$#m', $checksums, $m)) {
+        return null;
+    }
+    return ['cat' => $m[2], 'filename' => $m[3], 'md5' => $m[1]];
+}
+
+$action = $_POST['action'] ?? $_GET['action'] ?? '';
+
+switch ($action) {
+
+    case 'status':
+        $pkgs = [];
+        foreach ($PACKAGES as $name) {
+            $ver = installed_version($name);
+            $extra = glob("$EXTRA_DIR/$name-*.t?z");
+            $pkgs[] = [
+                'name'      => $name,
+                'installed' => $ver,
+                'in_extra'  => count($extra) > 0,
+                'extra_file' => $extra ? basename($extra[0]) : '',
+            ];
+        }
+
+        // GPG keys
+        $keys = [];
+        exec(gpg_cmd('--batch --with-colons --list-keys 2>/dev/null'), $pub_out);
+        exec(gpg_cmd('--batch --with-colons --list-secret-keys 2>/dev/null'), $sec_out);
+        $sec_fps = [];
+        foreach ($sec_out as $line) {
+            $fields = explode(':', $line);
+            if ($fields[0] === 'fpr') $sec_fps[] = $fields[9];
+        }
+
+        $cur = null;
+        $last_type = '';
+        foreach ($pub_out as $line) {
+            $f = explode(':', $line);
+            if ($f[0] === 'pub') {
+                if ($cur) $keys[] = $cur;
+                $last_type = 'pub';
+                $cur = [
+                    'algo'    => $f[3],
+                    'bits'    => $f[2],
+                    'keyid'   => $f[4],
+                    'created' => $f[5],
+                    'expires' => $f[6],
+                    'trust'   => $f[1],
+                    'caps'    => $f[11] ?? '',
+                    'fpr'     => '',
+                    'uid'     => '',
+                    'secret'  => false,
+                    'subs'    => [],
+                ];
+            }
+            if ($f[0] === 'sub' && $cur) {
+                $last_type = 'sub';
+                $cur['subs'][] = [
+                    'algo'  => $f[3],
+                    'bits'  => $f[2],
+                    'keyid' => $f[4],
+                    'caps'  => $f[11] ?? '',
+                    'fpr'   => '',
+                ];
+            }
+            if ($f[0] === 'fpr' && $cur) {
+                if ($last_type === 'sub' && $cur['subs']) {
+                    $idx = count($cur['subs']) - 1;
+                    if ($cur['subs'][$idx]['fpr'] === '') $cur['subs'][$idx]['fpr'] = $f[9];
+                } elseif ($cur['fpr'] === '') {
+                    $cur['fpr'] = $f[9];
+                    $cur['secret'] = in_array($f[9], $sec_fps);
+                }
+            }
+            if ($f[0] === 'uid' && $cur && $cur['uid'] === '') {
+                $cur['uid'] = $f[9];
+            }
+        }
+        if ($cur) $keys[] = $cur;
+
+        echo json_encode([
+            'ok'           => true,
+            'packages'     => $pkgs,
+            'keys'         => $keys,
+            'flash_backup' => is_dir($FLASH_GPG),
+            'snapshots'    => snapshot_list(),
+        ]);
+        exit;
+
+    case 'list_backups':
+        echo json_encode(['ok' => true, 'snapshots' => snapshot_list()]);
+        exit;
+
+    case 'check_updates':
+        $mirror = slackware_mirror();
+        $ctx = stream_context_create(['http' => [
+            'timeout'       => 15,
+            'user_agent'    => 'gnupg2-unraid/1.0',
+            'ignore_errors' => true,
+        ]]);
+        $checksums = @file_get_contents("$mirror/CHECKSUMS.md5", false, $ctx);
+        if (!$checksums) {
+            api_json(false, "Could not fetch package list from mirror:\n$mirror/CHECKSUMS.md5");
+        }
+
+        $results = [];
+        foreach ($PACKAGES as $name) {
+            $pkg = lookup_package($name, $checksums);
+            if (!$pkg) continue;
+            $results[] = [
+                'name'      => $name,
+                'filename'  => $pkg['filename'],
+                'md5'       => $pkg['md5'],
+                'url'       => "$mirror/slackware64/{$pkg['cat']}/{$pkg['filename']}",
+                'installed' => installed_version($name),
+            ];
+        }
+        if (empty($results)) {
+            api_json(false, "No matching packages found in $mirror");
+        }
+        echo json_encode(['ok' => true, 'packages' => $results, 'mirror' => $mirror]);
+        exit;
+
+    case 'install_packages':
+        $mirror = slackware_mirror();
+        $ctx = stream_context_create(['http' => [
+            'timeout'       => 15,
+            'user_agent'    => 'gnupg2-unraid/1.0',
+            'ignore_errors' => true,
+        ]]);
+        $checksums = @file_get_contents("$mirror/CHECKSUMS.md5", false, $ctx);
+        if (!$checksums) {
+            api_json(false, "Could not fetch package list from mirror.");
+        }
+
+        @mkdir($EXTRA_DIR, 0755, true);
+        $log = [];
+
+        foreach ($PACKAGES as $name) {
+            $pkg = lookup_package($name, $checksums);
+            if (!$pkg) {
+                $log[] = "$name: not found in mirror";
+                continue;
+            }
+
+            $filename = $pkg['filename'];
+            $url = "$mirror/slackware64/{$pkg['cat']}/$filename";
+            $dest = "$EXTRA_DIR/$filename";
+            $expected_md5 = $pkg['md5'];
+
+            // Remove old versions from /boot/extra
+            foreach (glob("$EXTRA_DIR/$name-*.t?z") as $old) {
+                if ($old !== $dest) unlink($old);
+            }
+
+            // Download
+            exec('curl -fsSL ' . escapeshellarg($url) . ' -o ' . escapeshellarg($dest) . ' 2>&1', $out, $rc);
+            if ($rc !== 0 || !file_exists($dest)) {
+                $log[] = "$name: download failed";
+                continue;
+            }
+
+            // Verify MD5
+            $actual_md5 = md5_file($dest);
+            if ($actual_md5 !== $expected_md5) {
+                unlink($dest);
+                $log[] = "$name: MD5 mismatch (expected $expected_md5, got $actual_md5)";
+                continue;
+            }
+
+            // Install/upgrade
+            exec('upgradepkg --install-new ' . escapeshellarg($dest) . ' 2>&1', $inst_out, $inst_rc);
+            $log[] = "$name: installed $filename" . ($inst_rc !== 0 ? " (exit $inst_rc)" : "");
+        }
+
+        api_json(true, implode("\n", $log));
+        break;
+
+    case 'generate_key':
+        $name  = trim($_POST['key_name'] ?? '');
+        $email = trim($_POST['key_email'] ?? '');
+        if ($name === '') api_json(false, 'Name is required.');
+
+        // Validate algorithm
+        $valid_algos = ['ed25519', 'rsa2048', 'rsa4096', 'nistp256', 'nistp384', 'nistp521'];
+        $algo = in_array($_POST['key_algo'] ?? '', $valid_algos) ? $_POST['key_algo'] : 'ed25519';
+
+        // Validate usages — cert is always required on a primary key
+        $valid_usage_items = ['sign', 'cert', 'auth'];
+        $raw_usages = array_filter(
+            array_map('trim', explode(',', $_POST['key_usages'] ?? 'sign,cert')),
+            fn($u) => in_array($u, $valid_usage_items)
+        );
+        if (!in_array('cert', $raw_usages)) $raw_usages[] = 'cert';
+        $usages = implode(',', array_unique($raw_usages));
+
+        $add_encr = ($_POST['key_encr'] ?? '1') === '1';
+
+        $uid = $email !== '' ? "$name <$email>" : $name;
+        exec(gpg_cmd('--batch --passphrase "" --quick-gen-key ')
+            . escapeshellarg($uid) . ' '
+            . escapeshellarg($algo) . ' '
+            . escapeshellarg($usages) . ' never 2>&1', $out, $rc);
+        if ($rc !== 0) {
+            api_json(false, "Key generation failed:\n" . implode("\n", $out));
+        }
+
+        // Get the fingerprint of the newly created key
+        exec(gpg_cmd('--batch --with-colons --list-key ') . escapeshellarg($uid) . ' 2>/dev/null', $list_out);
+        $fpr = '';
+        foreach ($list_out as $line) {
+            $f = explode(':', $line);
+            if ($f[0] === 'fpr' && $fpr === '') { $fpr = $f[9]; break; }
+        }
+
+        // Add encryption subkey (algo paired with primary)
+        if ($add_encr && $fpr !== '') {
+            $encr_algo_map = [
+                'ed25519' => 'cv25519', 'rsa2048' => 'rsa2048', 'rsa4096' => 'rsa4096',
+                'nistp256' => 'nistp256', 'nistp384' => 'nistp384', 'nistp521' => 'nistp521',
+            ];
+            $encr_algo = $encr_algo_map[$algo] ?? 'cv25519';
+            exec(gpg_cmd('--batch --passphrase "" --quick-add-key ')
+                . escapeshellarg($fpr) . ' '
+                . escapeshellarg($encr_algo) . ' encr never 2>&1', $sub_out, $sub_rc);
+            if ($sub_rc !== 0) {
+                api_json(false, "Key created but encryption subkey failed:\n" . implode("\n", $sub_out));
+            }
+            $out = array_merge($out, $sub_out);
+        }
+
+        // Snapshot to flash
+        [$snap_ok, $snap_msg] = run_backup("key generated: $uid");
+        $note = $snap_ok ? '' : "\n\nWARNING — flash backup failed:\n$snap_msg";
+        api_json(true, "Key generated for: $uid\n" . implode("\n", $out) . $note);
+        break;
+
+    case 'delete_key':
+        $fpr = preg_replace('/[^A-Fa-f0-9]/', '', $_POST['fingerprint'] ?? '');
+        if (strlen($fpr) < 16) api_json(false, 'Invalid fingerprint.');
+
+        exec(gpg_cmd('--batch --yes --delete-secret-and-public-key ') . escapeshellarg($fpr) . ' 2>&1', $out, $rc);
+        if ($rc !== 0) {
+            // May not have secret key, try public only
+            exec(gpg_cmd('--batch --yes --delete-keys ') . escapeshellarg($fpr) . ' 2>&1', $out2, $rc2);
+            if ($rc2 !== 0) {
+                api_json(false, "Delete failed:\n" . implode("\n", array_merge($out, $out2)));
+            }
+        }
+        // The helper snapshots the flash backup before the mirror drops the key
+        // from it, so this deletion stays recoverable.
+        run_backup("key deleted: $fpr");
+        api_json(true, "Deleted key $fpr\nThe snapshot taken just before this in $SNAP_DIR still contains it if you need it back.");
+        break;
+
+    case 'export_key':
+        $fpr = preg_replace('/[^A-Fa-f0-9]/', '', $_GET['fingerprint'] ?? '');
+        if (strlen($fpr) < 16) api_json(false, 'Invalid fingerprint.');
+        exec(gpg_cmd('--batch --armor --export ') . escapeshellarg($fpr) . ' 2>&1', $out, $rc);
+        if ($rc !== 0 || empty($out)) {
+            api_json(false, "Export failed:\n" . implode("\n", $out));
+        }
+        echo json_encode(['ok' => true, 'armor' => implode("\n", $out)]);
+        exit;
+
+    case 'import_key':
+        $armor = $_POST['armor'] ?? '';
+        if (strlen($armor) < 50 || strlen($armor) > 65536) {
+            api_json(false, 'Key data rejected: too short or too large.');
+        }
+        $tmp = tempnam('/tmp', 'gpg-import-');
+        file_put_contents($tmp, $armor);
+        exec(gpg_cmd('--batch --import ') . escapeshellarg($tmp) . ' 2>&1', $out, $rc);
+        @unlink($tmp);
+        if ($rc !== 0) {
+            api_json(false, "Import failed:\n" . implode("\n", $out));
+        }
+        [$snap_ok, $snap_msg] = run_backup('key imported');
+        $note = $snap_ok ? '' : "\n\nWARNING — flash backup failed:\n$snap_msg";
+        api_json(true, "Key imported.\n" . implode("\n", $out) . $note);
+        break;
+
+    case 'backup':
+        [$ok, $msg] = run_backup('manual');
+        api_json($ok, $msg !== '' ? $msg : ($ok ? 'Flash backup updated.' : 'Backup failed.'));
+        break;
+
+    case 'restore':
+        // The helper stashes the current keyring under /root before merging.
+        $file = basename(trim($_POST['file'] ?? ''));
+        $args = ' restore';
+        if ($file !== '' && $file !== '.' && $file !== '..') {
+            if (!preg_match('/^gnupg-[0-9]{8}-[0-9]{6}\.tar\.gz$/', $file)) {
+                api_json(false, 'Invalid snapshot name.');
+            }
+            if (!is_file("$SNAP_DIR/$file")) {
+                api_json(false, "Snapshot not found: $file");
+            }
+            $args .= ' --from ' . escapeshellarg($file);
+        } elseif (empty(snapshot_list()) && !is_dir($FLASH_GPG)) {
+            api_json(false, 'No backup found on flash.');
+        }
+        if (!is_executable($BACKUP_SH)) {
+            api_json(false, 'Backup helper not installed.');
+        }
+        exec(escapeshellarg($BACKUP_SH) . $args . ' 2>&1', $out, $rc);
+        api_json($rc === 0, implode("\n", $out) ?: ($rc === 0 ? 'Keyring restored from flash.' : 'Restore failed.'));
+        break;
+
+    default:
+        api_json(false, "Unknown action: $action");
+}
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# gnupg2 plugin — install script
+# Downloads gnupg2 + dependencies from Slackware mirror to /boot/extra/.
+set -e
+
+EXTRA_DIR="/boot/extra"
+PKG_DB="/var/lib/pkgtools/packages"
+PACKAGES="gnupg2 libassuan libksba npth"
+
+# Look up a package path from CHECKSUMS.md5 (returns category/filename)
+lookup_package() {
+    local name="$1"
+    echo "$CHECKSUMS" | grep -oP "(?<=\./)slackware64/[^/]+/${name}-[^\s]+\.txz(?=\s|$)" | head -1
+}
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
+CRON_DIR="/boot/config/plugins/gnupg2"
+
+# Detect Slackware base — Unraid 7.x reports "Slackware 15.0+" but tracks -current
+SLACK_VER=$(cat /etc/slackware-version 2>/dev/null)
+if echo "$SLACK_VER" | grep -qP '\+$'; then
+    MIRROR="https://mirrors.slackware.com/slackware/slackware64-current"
+else
+    SLACK_NUM=$(echo "$SLACK_VER" | grep -oP '[\d.]+')
+    MIRROR="https://mirrors.slackware.com/slackware/slackware64-${SLACK_NUM:-current}"
+fi
+
+echo "gnupg2: using mirror $MIRROR"
+
+mkdir -p "$EXTRA_DIR"
+mkdir -p "/usr/local/emhttp/plugins/gnupg2/event"
+
+# Fetch CHECKSUMS.md5 to find latest package filenames
+CHECKSUMS=$(curl -fsSL "$MIRROR/CHECKSUMS.md5" 2>/dev/null) || {
+    echo "gnupg2: WARNING — could not fetch CHECKSUMS.md5, skipping package download"
+    echo "gnupg2: use the web UI to download packages later"
+    exit 0
+}
+
+for name in $PACKAGES; do
+    pkg_path=$(lookup_package "$name")
+    if [ -z "$pkg_path" ]; then
+        echo "gnupg2: $name — not found in mirror"
+        continue
+    fi
+
+    filename=$(basename "$pkg_path")
+    url="$MIRROR/$pkg_path"
+
+    # Check if already in /boot/extra
+    if [ -f "$EXTRA_DIR/$filename" ]; then
+        echo "gnupg2: $name — $filename already in /boot/extra"
+        continue
+    fi
+
+    # Remove old versions
+    rm -f "$EXTRA_DIR"/$name-*.t?z
+
+    echo "gnupg2: downloading $name — $filename"
+    curl -fsSL "$url" -o "$EXTRA_DIR/$filename" || {
+        echo "gnupg2: $name — download failed"
+        continue
+    }
+
+    upgradepkg --install-new "$EXTRA_DIR/$filename" 2>&1
+done
+
+# Restore GPG keyring from the newest usable snapshot (falls back to the legacy
+# /boot/config/gnupg mirror for installs that predate snapshot backups)
+if [ -x "$BACKUP_SH" ]; then
+    "$BACKUP_SH" restore || echo "gnupg2: WARNING — keyring restore failed, snapshots left intact"
+
+    # Register the daily snapshot job; /etc is tmpfs so event-started re-registers
+    # it on every boot as well.
+    mkdir -p "$CRON_DIR"
+    cat > "$CRON_DIR/gnupg2.cron" <<'CRON'
+# Daily GPG keyring snapshot to flash (gnupg2 plugin)
+40 4 * * * /usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh backup --reason scheduled &>/dev/null
+CRON
+    if command -v update_cron >/dev/null 2>&1; then
+        update_cron
+    fi
+else
+    echo "gnupg2: WARNING — backup helper missing, keyring not restored"
+fi
+
+echo "gnupg2: install complete"
+gpg --version | head -1 || true
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# gnupg2 plugin — remove script
+# Takes a final keyring snapshot, removes plugin files.
+# Does NOT remove packages from /boot/extra, and does NOT remove the snapshots
+# in /boot/config/gnupg-backups — uninstalling the plugin must never be a way to
+# lose your keys.
+
+BACKUP_SH="/usr/local/emhttp/plugins/gnupg2/scripts/gnupg2-backup.sh"
+CRON_DIR="/boot/config/plugins/gnupg2"
+
+if [ -x "$BACKUP_SH" ]; then
+    "$BACKUP_SH" backup --reason "plugin removal" \
+        || echo "gnupg2: final backup reported a problem — check the syslog"
+fi
+
+# Drop the scheduled snapshot job
+rm -f "$CRON_DIR/gnupg2.cron"
+command -v update_cron >/dev/null 2>&1 && update_cron
+
+# Remove plugin UI files (packages in /boot/extra are left for the user to manage)
+rm -rf /usr/local/emhttp/plugins/gnupg2
+
+echo "gnupg2: plugin removed"
+echo "gnupg2: keyring snapshots kept in /boot/config/gnupg-backups"
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>
