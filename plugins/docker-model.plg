@@ -1,0 +1,107 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name       "docker-model">
+  <!ENTITY version    "2026.08.01">
+  <!ENTITY plugin_dir "/boot/config/plugins/docker-model">
+]>
+<PLUGIN name="&name;"
+        version="&version;"
+        pluginURL="https://raw.githubusercontent.com/fonix232/network-tools/main/plugins/docker-model.plg"
+        support="https://github.com/fonix232/network-tools/issues"
+        min="6.12.0">
+
+<CHANGES>
+### 2026.08.01
+- Docker Model Runner CLI plugin (`docker model`), bundles v1.2.6 compiled from source in CI
+- Binary is pinned to this plugin release, cached on flash, restored on every array start
+- The inference server itself runs as a container that `docker model install-runner` creates
+  (also runs implicitly on first use); models persist in a docker volume
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/docker-model/event/started" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+PLUGIN_DIR="/boot/config/plugins/docker-model"
+CACHED="$PLUGIN_DIR/docker-model"
+INSTALL_DIR="/usr/local/lib/docker/cli-plugins"
+
+if [ -f "$CACHED" ]; then
+    mkdir -p "$INSTALL_DIR"
+    install -m 0755 "$CACHED" "$INSTALL_DIR/docker-model"
+    echo "docker-model: installed from flash to $INSTALL_DIR/docker-model"
+else
+    echo "docker-model: cached binary not found at $CACHED — reinstall the plugin to download it"
+fi
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+set -e
+
+PLUGIN_DIR="/boot/config/plugins/docker-model"
+CACHED="$PLUGIN_DIR/docker-model"
+INSTALL_DIR="/usr/local/lib/docker/cli-plugins"
+# Binary is a release asset on this plugin version's own release tag,
+# so plugin version and binary version always move together.
+URL="https://github.com/fonix232/network-tools/releases/download/unraid-docker-model-2026.08.01/docker-model"
+
+mkdir -p "$PLUGIN_DIR"
+mkdir -p "/usr/local/emhttp/plugins/docker-model/event"
+
+if [ -f "$CACHED" ] && [ "$(cat "$PLUGIN_DIR/version" 2>/dev/null)" = "2026.08.01" ]; then
+    echo "docker-model: cached binary for 2026.08.01 present, skipping download"
+else
+    echo "docker-model: downloading $URL"
+    curl -fsSL --retry 3 "$URL" -o /tmp/docker-model || {
+        echo "docker-model: ERROR — download failed"
+        exit 1
+    }
+    install -m 0755 /tmp/docker-model "$CACHED"
+    rm -f /tmp/docker-model
+    echo "2026.08.01" > "$PLUGIN_DIR/version"
+fi
+
+mkdir -p "$INSTALL_DIR"
+install -m 0755 "$CACHED" "$INSTALL_DIR/docker-model"
+echo "docker-model: installed to $INSTALL_DIR/docker-model"
+
+if docker info >/dev/null 2>&1; then
+    docker model version 2>&1 || true
+else
+    echo "docker-model: docker not running yet — 'docker model' will work once it is"
+fi
+
+echo ""
+echo "docker-model: the Model Runner container is created on first 'docker model' use,"
+echo "or explicitly with e.g.: docker model install-runner --host 0.0.0.0 --port 12434"
+echo "OpenAI-compatible API:   http://<bind-host>:12434/engines/v1"
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# Best-effort: remove the Model Runner container/images before the CLI goes
+# away. Models live in a docker volume and are preserved.
+if docker info >/dev/null 2>&1 && [ -x /usr/local/lib/docker/cli-plugins/docker-model ]; then
+    docker model uninstall-runner 2>/dev/null || true
+fi
+
+rm -f /usr/local/lib/docker/cli-plugins/docker-model
+rm -rf /usr/local/emhttp/plugins/docker-model
+
+echo "docker-model plugin removed. Downloaded models (docker volume) preserved —"
+echo "run 'docker volume rm docker-model-runner-models' to delete them."
+echo "Cached binary preserved at /boot/config/plugins/docker-model/ — remove manually if no longer needed."
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>
