@@ -1,7 +1,7 @@
 <?xml version='1.0' standalone='yes'?>
 <!DOCTYPE PLUGIN [
   <!ENTITY name       "gnupg2">
-  <!ENTITY version    "2026.07.28">
+  <!ENTITY version    "2026.08.01">
   <!ENTITY plugin_dir "/boot/config/plugins/gnupg2">
 ]>
 <PLUGIN name="&name;"
@@ -11,7 +11,7 @@
         min="6.10.0">
 
 <CHANGES>
-### 2026.07.28
+### 2026.08.01
 - Downloads gnupg2 + dependencies from Slackware mirror to /boot/extra
 - Web UI for package updates and GPG key management
 - Keyring mirrored to flash on array stop and restored on array start
