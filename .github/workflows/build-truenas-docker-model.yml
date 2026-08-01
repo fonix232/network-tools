@@ -1,0 +1,28 @@
+name: Build truenas/docker-model
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'truenas/docker-model/**'
+      - 'truenas/common/**'
+      - '.github/workflows/build-truenas-docker-model.yml'
+      - '.github/workflows/reusable-build-release.yml'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    permissions:
+      contents: write
+    with:
+      component_label: truenas/docker-model
+      tag_prefix: truenas-docker-model
+      build_working_directory: truenas/docker-model
+      build_command: docker compose run --rm build
+      artifact_path: truenas/docker-model/output/*.run
+      extra_release_notes: |
+        Artifacts are self-extracting .run installers for TrueNAS SCALE.
+        Ships the docker-model CLI plugin as a sysext; the runner itself is
+        installed as a container via `docker model install-runner`.
+    secrets: inherit

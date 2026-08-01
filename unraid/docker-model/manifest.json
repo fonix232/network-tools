@@ -1,0 +1,14 @@
+{
+  "template": "src/docker-model.plg.template",
+  "output": "docker-model.plg",
+  "constants": {
+    "__PLUGIN_URL__": "https://raw.githubusercontent.com/fonix232/network-tools/main/plugins/docker-model.plg",
+    "__SUPPORT_URL__": "https://github.com/fonix232/network-tools/issues",
+    "__RELEASE_DL_BASE__": "https://github.com/fonix232/network-tools/releases/download"
+  },
+  "substitutions": {
+    "__EVENT_STARTED__": "src/event-started",
+    "__INSTALL_SH__": "src/install.sh",
+    "__REMOVE_SH__": "src/remove.sh"
+  }
+}

@@ -10,9 +10,11 @@ Standalone tooling repository for platform-specific infrastructure plugins and i
 - `unraid/`
   - `komodo-periphery/` - Native Unraid plugin (PLG + txz payload).
   - `git-crypt/` - Unraid plugin for `git-crypt` binary management.
+  - `docker-model/` - Docker Model Runner CLI plugin (compiled from source in CI).
 - `truenas/`
   - `komodo-periphery/` - TrueNAS SCALE self-extracting sysext installers.
   - `git-crypt/` - TrueNAS SCALE self-extracting sysext installers.
+  - `docker-model/` - Docker Model Runner CLI plugin sysext (compiled from source).
 
 ## Release Model
 
@@ -20,8 +22,10 @@ Each plugin has its own workflow and trigger scope:
 
 - `build-unraid-komodo-periphery.yml`
 - `build-unraid-git-crypt.yml`
+- `build-unraid-docker-model.yml`
 - `build-truenas-komodo-periphery.yml`
 - `build-truenas-git-crypt.yml`
+- `build-truenas-docker-model.yml`
 
 Shared logic lives in:
 
@@ -38,9 +42,11 @@ Build tooling is centralized by target platform:
 - `truenas/common/Dockerfile.builder`
   - Shared TrueNAS builder image (curl, squashfs-tools, shared shell libs)
   - Runs plugin script injected at runtime via `PLUGIN_BUILD_SCRIPT`
+  - `truenas/docker-model` uses its own Go-enabled variant (compiles from source)
 - `unraid/common/Dockerfile.builder`
   - Shared UnRaid builder image (python, git, tar/xz)
   - Runs plugin build command injected at runtime via `BUILD_COMMAND`
+  - `unraid/docker-model` uses its own Go-enabled variant (compiles from source)
 
 Common helper libraries:
 

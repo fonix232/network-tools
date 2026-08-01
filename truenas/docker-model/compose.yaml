@@ -1,0 +1,26 @@
+# Builds self-extracting sysext installers for recent Docker Model Runner
+# releases (docker-model CLI plugin, compiled from source).
+#
+#   docker compose run --rm build
+#
+# Override defaults:
+#   RELEASE_COUNT=3 DMR_ARCH=x86_64 docker compose run --rm build
+
+# Distinct project name: unraid/docker-model would otherwise share the
+# default directory-derived name and clobber this builder image locally.
+name: truenas-docker-model
+
+services:
+  build:
+    build:
+      context: ../..
+      dockerfile: truenas/docker-model/Dockerfile.builder
+    platform: linux/amd64
+    volumes:
+      - ../..:/workspace:ro
+      - ./output:/output
+    environment:
+      RELEASE_COUNT: ${RELEASE_COUNT:-6}
+      DMR_ARCH: ${DMR_ARCH:-x86_64}
+      PLUGIN_BUILD_SCRIPT: truenas/docker-model/src/build.sh
+      INSTALL_TEMPLATE_PATH: /workspace/truenas/docker-model/src/install.sh

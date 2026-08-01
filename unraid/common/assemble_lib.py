@@ -112,6 +112,9 @@ def assemble_plg(plugin_dir: Path, version: str, output: str | None = None) -> N
             raise FileNotFoundError(f"Source file not found: {filepath}")
         content = content.replace(placeholder, filepath.read_text(encoding="utf-8").rstrip("\n"))
 
+    # __VERSION__ may also appear inside inlined file content, not just the template
+    content = content.replace("__VERSION__", version)
+
     # Literal constants (plugin URL, support URL, ...)
     for placeholder, value in manifest.get("constants", {}).items():
         content = content.replace(placeholder, str(value))

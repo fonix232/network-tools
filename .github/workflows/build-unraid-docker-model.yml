@@ -1,0 +1,36 @@
+name: Build unraid/docker-model
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'unraid/docker-model/**'
+      - 'unraid/common/**'
+      - 'truenas/common/release-fetch-lib.sh'
+      - '.github/workflows/build-unraid-docker-model.yml'
+      - '.github/workflows/reusable-build-release.yml'
+  workflow_dispatch:
+
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable-build-release.yml
+    permissions:
+      contents: write
+    with:
+      component_label: unraid/docker-model
+      tag_prefix: unraid-docker-model
+      build_working_directory: unraid/docker-model
+      build_command: docker compose run --rm build
+      artifact_path: unraid/docker-model/dist/*
+      publish_path: plugins/docker-model.plg
+      publish_source: unraid/docker-model/dist/docker-model.plg
+      extra_release_notes: |
+        Install via Unraid Plugins > Install Plugin using:
+        https://raw.githubusercontent.com/fonix232/network-tools/main/plugins/docker-model.plg
+
+        That URL always serves the newest build, and Unraid's plugin update
+        checker uses it to offer future updates automatically. The .plg attached
+        to this release is the pinned copy of this specific version; the
+        docker-model asset is the compiled CLI plugin binary the .plg downloads
+        at install time.
+    secrets: inherit

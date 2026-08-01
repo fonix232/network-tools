@@ -1,0 +1,23 @@
+# Compiles the docker-model CLI plugin from source and assembles the .plg.
+#
+#   docker compose run --rm build
+#
+# VERSION defaults to today's date (set by the builder entrypoint); CI passes
+# the release version so the .plg's pinned binary download URL matches the
+# release tag.
+
+# Distinct project name: truenas/docker-model would otherwise share the
+# default directory-derived name and clobber this builder image locally.
+name: unraid-docker-model
+
+services:
+  build:
+    build:
+      context: ../..
+      dockerfile: unraid/docker-model/Dockerfile.builder
+    platform: linux/amd64
+    volumes:
+      - ../..:/workspace
+    environment:
+      VERSION: ${VERSION:-}
+      BUILD_COMMAND: sh unraid/docker-model/src/build.sh

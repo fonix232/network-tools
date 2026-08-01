@@ -4,7 +4,8 @@ __pycache__/
 
 # Generated build artifacts
 *.plg
-output/*.run
+**/output/*.run
+unraid/docker-model/dist/
 
 # ...except the published copies CI commits back to main. These are what
 # Unraid's plugin update checker fetches via each plugin's pluginURL, so they

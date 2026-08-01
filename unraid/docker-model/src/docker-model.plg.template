@@ -1,0 +1,45 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+  <!ENTITY name       "docker-model">
+  <!ENTITY version    "__VERSION__">
+  <!ENTITY plugin_dir "/boot/config/plugins/docker-model">
+]>
+<PLUGIN name="&name;"
+        version="&version;"
+        pluginURL="__PLUGIN_URL__"
+        support="__SUPPORT_URL__"
+        min="6.12.0">
+
+<CHANGES>
+### __VERSION__
+- Docker Model Runner CLI plugin (`docker model`), bundles __UPSTREAM_TAG__ compiled from source in CI
+- Binary is pinned to this plugin release, cached on flash, restored on every array start
+- The inference server itself runs as a container that `docker model install-runner` creates
+  (also runs implicitly on first use); models persist in a docker volume
+</CHANGES>
+
+<FILE Name="/usr/local/emhttp/plugins/docker-model/event/started" Mode="0755">
+<INLINE>
+<![CDATA[
+__EVENT_STARTED__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+<![CDATA[
+__INSTALL_SH__
+]]>
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+__REMOVE_SH__
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>

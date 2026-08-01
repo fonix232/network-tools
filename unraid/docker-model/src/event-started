@@ -1,0 +1,12 @@
+#!/bin/bash
+PLUGIN_DIR="/boot/config/plugins/docker-model"
+CACHED="$PLUGIN_DIR/docker-model"
+INSTALL_DIR="/usr/local/lib/docker/cli-plugins"
+
+if [ -f "$CACHED" ]; then
+    mkdir -p "$INSTALL_DIR"
+    install -m 0755 "$CACHED" "$INSTALL_DIR/docker-model"
+    echo "docker-model: installed from flash to $INSTALL_DIR/docker-model"
+else
+    echo "docker-model: cached binary not found at $CACHED — reinstall the plugin to download it"
+fi
