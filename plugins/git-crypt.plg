@@ -1,7 +1,7 @@
 <?xml version='1.0' standalone='yes'?>
 <!DOCTYPE PLUGIN [
   <!ENTITY name       "git-crypt">
-  <!ENTITY version    "2026.07.28">
+  <!ENTITY version    "2026.08.01">
   <!ENTITY plugin_dir "/boot/config/plugins/git-crypt">
 ]>
 <PLUGIN name="&name;"
@@ -11,7 +11,7 @@
         min="6.10.0">
 
 <CHANGES>
-### 2026.07.28
+### 2026.08.01
 - Downloads latest git-crypt linux-x86_64 binary from GitHub releases on install
 - Restores cached binary from flash on every array start
 - Web UI for install/update/version checks
