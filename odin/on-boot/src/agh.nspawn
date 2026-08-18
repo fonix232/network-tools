@@ -1,0 +1,9 @@
+# Canonical copy of /etc/systemd/nspawn/agh.nspawn (odin).
+# /etc/systemd survives firmware updates; 0-setup-system.sh restores this
+# from /data/custom/machines/agh.nspawn if it ever goes missing.
+[Exec]
+Boot=on
+ResolvConf=off
+
+[Network]
+MACVLAN=br500
