@@ -35,22 +35,28 @@ else
     info "$DATASET already mounted"
 fi
 
-# -- Extract nvme-recover.sh from payload -------------------------------------
+# -- Extract scripts from payload ----------------------------------------------
 
 echo ""
-echo "=== Installing nvme-recover.sh ==="
+echo "=== Installing nvme-recover.sh + nvme-poll.sh ==="
 
 _marker=$(grep -n '^__PAYLOAD__$' "$0" | cut -d: -f1)
 [ -n "$_marker" ] || err "payload marker not found — was this script assembled by build.sh?"
 
-tail -n +$((_marker + 1)) "$0" | base64 -d > "$MOUNTPOINT/nvme-recover.sh"
-[ -s "$MOUNTPOINT/nvme-recover.sh" ] || err "extracted nvme-recover.sh is empty"
-chmod +x "$MOUNTPOINT/nvme-recover.sh"
-info "OK: $MOUNTPOINT/nvme-recover.sh"
+tail -n +$((_marker + 1)) "$0" | base64 -d | tar -xzf - -C "$MOUNTPOINT"
+rm -f "$MOUNTPOINT"/._*   # clean up any AppleDouble files from older macOS-built payloads
+for f in nvme-recover.sh nvme-poll.sh; do
+    [ -s "$MOUNTPOINT/$f" ] || err "extracted $f is empty"
+    chown root:root "$MOUNTPOINT/$f"
+    chmod +x "$MOUNTPOINT/$f"
+    info "OK: $MOUNTPOINT/$f"
+done
 
 # -- Register UDEV tunables ---------------------------------------------------
-#    Two tunables — one per rule — each writes its own rules file under
-#    /etc/udev/rules.d/ and is applied by TrueNAS middleware on boot.
+#    Two tunables — one per rule. TrueNAS middleware owns /etc/udev/rules.d
+#    entirely: every tunable create/delete regenerates the whole directory from
+#    the DB and reloads udev immediately (see middlewared etc_files/udev.py).
+#    Never write rules files there by hand — they get wiped on the next change.
 #    Idempotent: delete all existing nvme-recovery tunables, then recreate.
 
 echo ""
@@ -80,16 +86,57 @@ info "Registering 99-nvme-recovery-change"
 midclt call tunable.create \
     "{\"type\":\"UDEV\",\"var\":\"99-nvme-recovery-change\",\"value\":\"$(printf '%s' "$RULE_CHANGE" | sed 's/"/\\"/g')\"}"
 
-# -- Apply rules for this boot session ----------------------------------------
+# -- Verify middleware applied the rules ---------------------------------------
 
 echo ""
-echo "=== Applying udev rules ==="
+echo "=== Verifying rules ==="
 
-printf '%s\n' "$RULE_REMOVE" > /etc/udev/rules.d/99-nvme-recovery-remove.rules
-printf '%s\n' "$RULE_CHANGE" > /etc/udev/rules.d/99-nvme-recovery-change.rules
-udevadm control --reload-rules
+for rule in 99-nvme-recovery-remove 99-nvme-recovery-change; do
+    [[ -f "/etc/udev/rules.d/${rule}.rules" ]] \
+        || err "middleware did not generate /etc/udev/rules.d/${rule}.rules"
+    info "OK: ${rule}.rules active"
+done
 
-info "OK: rules active"
+# -- Register poller cron job (middleware DB — survives OS updates) ------------
+#    Detects the controller-reset-failure mode that emits no uevent (see
+#    nvme-poll.sh header). Idempotent: delete matching jobs, then recreate.
+
+echo ""
+echo "=== Registering poller cron job ==="
+
+OLD_CRON_IDS=$(midclt call cronjob.query \
+    | python3 -c "
+import json, sys
+for c in json.load(sys.stdin):
+    if 'nvme-watchdog' in (c.get('description') or '') or 'nvme-poll' in (c.get('command') or ''):
+        print(c['id'])
+" 2>/dev/null || true)
+
+for id in $OLD_CRON_IDS; do
+    info "Removing old cron job id=$id"
+    midclt call cronjob.delete "$id"
+done
+
+info "Creating nvme-watchdog poller cron (every minute, root)"
+midclt call cronjob.create '{
+    "description": "nvme-watchdog poller",
+    "command": "/bin/bash /var/lib/nvme-watchdog/nvme-poll.sh",
+    "user": "root",
+    "enabled": true,
+    "stdout": true,
+    "stderr": true,
+    "schedule": {"minute": "*", "hour": "*", "dom": "*", "month": "*", "dow": "*"}
+}'
+
+# cronjob.create updates the DB but (on 26.0-BETA at least) does not regenerate
+# the live crontab — force it, then verify. NOTE: middleware writes entries as
+# "midclt call cronjob.run <id>", so grep for that, not for the command string.
+midclt call etc.generate cron
+NEW_CRON_ID=$(midclt call cronjob.query '[["description","=","nvme-watchdog poller"]]' \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
+grep -qE "cronjob.run'? ${NEW_CRON_ID}\b" /etc/cron.d/middlewared \
+    || err "cron entry (cronjob.run ${NEW_CRON_ID}) not present in /etc/cron.d/middlewared after etc.generate"
+info "OK: poller live in /etc/cron.d/middlewared (cronjob.run ${NEW_CRON_ID})"
 
 # -- Done ---------------------------------------------------------------------
 
@@ -97,7 +144,8 @@ echo ""
 echo "=== Done ==="
 info "Verify tunables: midclt call tunable.query"
 info "Verify rules:    ls /etc/udev/rules.d/99-nvme-recovery*.rules"
-info "Test logs:       journalctl -t nvme-watchdog -f"
+info "Verify cron:     midclt call cronjob.query | grep -o 'nvme-watchdog poller'"
+info "Watchdog logs:   journalctl -t nvme-watchdog -t nvme-watchdog-poll -f"
 exit 0
 
 __PAYLOAD__
