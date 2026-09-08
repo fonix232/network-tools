@@ -1,0 +1,14 @@
+# /etc/systemd/system/dns-fallback-watchdog.timer
+# Every 2 minutes: if AGH is down, open the emergency DNS path (after 2
+# consecutive failed probes); once AGH answers again, close it. Also re-asserts
+# the fallback if a controller reprovision rewrote the runtime resolv file
+# mid-outage.
+[Unit]
+Description=Run the AGH DNS health watchdog every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

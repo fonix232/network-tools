@@ -7,16 +7,19 @@ HOST="${1:-root@10.0.0.1}"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== Copying files to $HOST ==="
-scp "$SRC_DIR/0-setup-system.sh" "$SRC_DIR/10-setup-network.sh" "$HOST:/data/on_boot.d/"
+scp "$SRC_DIR/0-setup-system.sh" "$SRC_DIR/10-setup-network.sh" "$SRC_DIR/99-verify-dns.sh" "$HOST:/data/on_boot.d/"
 scp "$SRC_DIR/agh.nspawn" "$HOST:/data/custom/machines/agh.nspawn"
 scp "$SRC_DIR/macvlan-shims.conf" "$HOST:/data/custom/macvlan-shims.conf"
-ssh "$HOST" 'mkdir -p /etc/systemd/system/udm-boot.service.d'
+ssh "$HOST" 'mkdir -p /data/custom/bin /etc/systemd/system/udm-boot.service.d'
+scp "$SRC_DIR/dns-fallback.sh" "$HOST:/data/custom/bin/dns-fallback.sh"
 scp "$SRC_DIR/udm-boot-wait-for-dpkg-restore.conf" "$HOST:/etc/systemd/system/udm-boot.service.d/wait-for-dpkg-restore.conf"
+scp "$SRC_DIR/dns-fallback-watchdog.service" "$SRC_DIR/dns-fallback-watchdog.timer" "$HOST:/etc/systemd/system/"
 
 echo "=== Installing on device ==="
 ssh "$HOST" '
 set -e
-chmod +x /data/on_boot.d/0-setup-system.sh /data/on_boot.d/10-setup-network.sh
+chmod +x /data/on_boot.d/0-setup-system.sh /data/on_boot.d/10-setup-network.sh \
+         /data/on_boot.d/99-verify-dns.sh /data/custom/bin/dns-fallback.sh
 
 # Live nspawn config (also restored from /data by 0-setup-system.sh if lost)
 mkdir -p /etc/systemd/nspawn
@@ -34,27 +37,32 @@ Restart=on-failure
 RestartSec=15
 EOF
 systemctl daemon-reload
+systemctl enable --now dns-fallback-watchdog.timer
 
-# Backups of the udm-boot unit + drop-in for manual recovery
+# Backups of the boot-critical units for manual recovery / phase-0 self-heal
 mkdir -p /data/custom/systemd-backup
 cp -f /etc/systemd/system/udm-boot.service /data/custom/systemd-backup/
 cp -f /etc/systemd/system/udm-boot.service.d/wait-for-dpkg-restore.conf /data/custom/systemd-backup/
+cp -f /etc/systemd/system/dns-fallback-watchdog.service /data/custom/systemd-backup/
+cp -f /etc/systemd/system/dns-fallback-watchdog.timer /data/custom/systemd-backup/
 
 # Remove the dnsmasq listen hack left by the old network script, if present
 rm -f /run/dnsmasq.dhcp.conf.d/macvlan.conf
 '
 
-echo "=== Validation: run both scripts (idempotent) ==="
-ssh "$HOST" 'bash /data/on_boot.d/0-setup-system.sh && bash /data/on_boot.d/10-setup-network.sh'
+echo "=== Validation: run the boot scripts (idempotent) ==="
+ssh "$HOST" 'bash /data/on_boot.d/0-setup-system.sh && bash /data/on_boot.d/10-setup-network.sh && bash /data/on_boot.d/99-verify-dns.sh'
 
 echo "=== Verify ==="
 ssh "$HOST" '
 set -e
 echo "-- udm-boot unit:"; systemctl is-enabled udm-boot
+echo "-- watchdog timer:"; systemctl is-enabled dns-fallback-watchdog.timer && systemctl is-active dns-fallback-watchdog.timer
 echo "-- machine:"; machinectl list | grep agh
 echo "-- shim:"; ip -br addr show dev br500.mac
 echo "-- route:"; ip route show 10.10.5.5/32
 echo "-- DNS answer from AGH:"; timeout 5 nslookup google.com 10.10.5.5 | head -2
-echo "-- deb cache:"; ls /data/custom/dpkg/*.deb | head -4
+echo "-- fallback:"; /data/custom/bin/dns-fallback.sh status
+echo "-- deb cache:"; ls /data/custom/dpkg/*.deb | head -4; echo "   release: $(cat /data/custom/dpkg/.release 2>/dev/null || echo "(unstamped)")"
 '
 echo "=== Deploy complete ==="

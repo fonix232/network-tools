@@ -1,0 +1,9 @@
+# /etc/systemd/system/dns-fallback-watchdog.service
+# Probes AGH and engages/disengages the emergency DNS fallback (see
+# /data/custom/bin/dns-fallback.sh). Triggered by dns-fallback-watchdog.timer.
+[Unit]
+Description=AGH DNS health watchdog (engage/disengage emergency DNS fallback)
+
+[Service]
+Type=oneshot
+ExecStart=/data/custom/bin/dns-fallback.sh auto

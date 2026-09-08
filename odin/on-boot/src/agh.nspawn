@@ -4,6 +4,12 @@
 [Exec]
 Boot=on
 ResolvConf=off
+# UniFi OS 6 ships systemd-nspawn 257 on the old 5.4 kernel; the stock unit's
+# -U (private user namespace) now fails: "Failed to resolve /proc/sys:
+# Permission denied" — 5.4 lacks the idmapped-mount support 257 expects.
+# --settings=override makes this file win over the -U flag. Remove if
+# Ubiquiti ever ships a >=5.12 kernel.
+PrivateUsers=no
 
 [Network]
 MACVLAN=br500
