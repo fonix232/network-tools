@@ -31,13 +31,16 @@ it is a network-wide DNS outage. `/data/custom/bin/dns-fallback.sh` is the
 pressure valve:
 
 - **engage** — deletes any nat DNAT rules steering port 53 at the AGH IPs
-  (from `macvlan-shims.conf`), and appends public nameservers (1.1.1.1,
+  (from `macvlan-shims.conf`), recording each deleted rule in
+  `/run/dns-fallback/deleted-rules`, and appends public nameservers (1.1.1.1,
   9.9.9.9) to dnsmasq's runtime resolv file (`/run/resolv.conf.d/main`).
   Clients are REDIRECTed into that dnsmasq, and the host resolves through it
   (127.0.0.1) — so one edit restores DNS for the whole network *and* for apt
   on the gateway itself.
-- **disengage** — removes the resolv block. Deleted DNAT rules are
-  controller-owned and return on the next provision.
+- **disengage** — removes the resolv block and replays the recorded
+  force-DNS rules, skipping any the controller already re-added via a
+  provision. (After a reboot the record is gone, but so are the deletions —
+  boot re-applies the full controller ruleset.)
 - **auto** — probes AGH, then engages (2-consecutive-failure hysteresis) or
   disengages. While engaged, an unhealthy probe re-asserts the fallback,
   healing a controller reprovision that rewrote the resolv file mid-outage.

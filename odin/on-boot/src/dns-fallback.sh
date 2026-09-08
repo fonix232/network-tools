@@ -9,13 +9,13 @@
 # This script opens a minimal bypass so the network keeps resolving while AGH
 # is down, and closes it again once AGH answers:
 #
-#   engage    1) delete any nat DNAT rules steering port 53 at the AGH IPs
-#                (the controller re-adds them on its next provision — that is
-#                the desired self-heal once AGH is back)
+#   engage    1) delete any nat DNAT rules steering port 53 at the AGH IPs,
+#                recording each deleted rule for later replay
 #             2) append public nameservers to dnsmasq's runtime resolv file so
 #                the gateway dnsmasq (the REDIRECT target, and the host's own
 #                resolver via 127.0.0.1) resolves upstream again
-#   disengage remove the resolv block (DNAT rules are controller-owned)
+#   disengage remove the resolv block and replay the recorded force-DNS rules
+#             (skipping any the controller already re-added via a provision)
 #   auto      probe AGH, then engage/disengage accordingly — used by the
 #             dns-fallback-watchdog timer and /data/on_boot.d/99-verify-dns.sh.
 #             While engaged, an unhealthy probe re-asserts the fallback, which
@@ -33,6 +33,7 @@ PROBE_NAME="gstatic.com"
 MARK_BEGIN="# DNS-FALLBACK-BEGIN (managed by dns-fallback.sh; removed when AGH is healthy)"
 MARK_END="# DNS-FALLBACK-END"
 STATE_DIR="/run/dns-fallback"
+RULES_FILE="$STATE_DIR/deleted-rules"   # rules we deleted, replayed on disengage
 FAIL_THRESHOLD=2   # consecutive failed watchdog probes before engaging
 
 log() { logger -t "$LOG_TAG" -- "$*"; echo "[$LOG_TAG] $*"; }
@@ -60,7 +61,8 @@ delete_dnat_rules() {
     # Remove force-DNS DNAT rules pointing port 53 at a (dead) AGH IP. The
     # current controller config uses REDIRECT-to-local-dnsmasq (which we keep
     # — it lands on the dnsmasq we just gave working upstreams); this covers
-    # the DNAT-to-container variant seen pre-OS6 (2026-08-10 outage).
+    # the DNAT-to-container variant seen pre-OS6 (2026-08-10 outage). Every
+    # deleted rule is recorded (original -A form) so disengage can replay it.
     local savecmd tablecmd ip
     for savecmd in iptables-save ip6tables-save; do
         tablecmd="${savecmd%-save}"
@@ -68,15 +70,37 @@ delete_dnat_rules() {
             "$savecmd" -t nat 2>/dev/null \
               | grep -E -- '--dport 53( .*)? -j DNAT' \
               | grep -F -- "--to-destination ${ip}" \
-              | sed 's/^-A /-D /' \
-              | while read -r rule; do
+              | while read -r rule; do   # rule starts with "-A "
                     # shellcheck disable=SC2086 — rule fields must word-split
-                    if "$tablecmd" -t nat $rule 2>/dev/null; then
+                    if "$tablecmd" -t nat ${rule/#-A /-D } 2>/dev/null; then
                         log "deleted force-DNS rule: $tablecmd -t nat $rule"
+                        grep -qxF "$tablecmd $rule" "$RULES_FILE" 2>/dev/null \
+                            || echo "$tablecmd $rule" >> "$RULES_FILE"
                     fi
                 done
         done
     done
+}
+
+restore_dnat_rules() {
+    # Replay the force-DNS rules deleted by engage, skipping any the
+    # controller already re-added via a provision. After a reboot the record
+    # is gone, but so are our deletions — boot re-applies the full controller
+    # ruleset anyway.
+    [ -s "$RULES_FILE" ] || return 0
+    local cmd rule
+    while read -r cmd rule; do
+        [ -n "$rule" ] || continue
+        # shellcheck disable=SC2086 — rule fields must word-split
+        if ! "$cmd" -t nat -C ${rule#-A } 2>/dev/null; then
+            if "$cmd" -t nat $rule 2>/dev/null; then
+                log "restored force-DNS rule: $cmd -t nat $rule"
+            else
+                log "WARNING: could not restore rule (controller re-adds it on the next provision): $cmd -t nat $rule"
+            fi
+        fi
+    done < "$RULES_FILE"
+    rm -f "$RULES_FILE"
 }
 
 engage() {
@@ -100,8 +124,9 @@ disengage() {
     if grep -qF "DNS-FALLBACK-BEGIN" "$RESOLV" 2>/dev/null; then
         sed -i '/DNS-FALLBACK-BEGIN/,/DNS-FALLBACK-END/d' "$RESOLV"
         hup_dnsmasq
-        log "DISENGAGED: fallback DNS removed from $RESOLV — $reason (deleted force-DNS rules return on the next controller provision)"
+        log "DISENGAGED: fallback DNS removed from $RESOLV — $reason"
     fi
+    restore_dnat_rules
     rm -f "$STATE_DIR/engaged" "$STATE_DIR/failcount"
 }
 
