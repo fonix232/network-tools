@@ -37,6 +37,26 @@ jobs:
       - name: Test
         run: python -m pytest tests -q
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: homeassistant/matterbook/panel/package-lock.json
+
+      - name: Build the panel
+        working-directory: homeassistant/matterbook/panel
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+
+      - name: Check the committed panel bundle is current
+        run: |
+          if ! git diff --exit-code -- custom_components/matterbook/panel/; then
+            echo "::error::The committed panel bundle is stale. Run 'npm run build' in panel/ and commit the result."
+            exit 1
+          fi
+
       - name: Validate integration metadata
         run: |
           python - <<'PY'
