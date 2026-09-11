@@ -70,6 +70,12 @@ jobs:
           for key in ("domain", "name", "version", "documentation", "issue_tracker", "codeowners"):
               assert manifest.get(key), f"manifest.json is missing {key}"
 
+          # hassfest enforces this in the published repository, where it is a
+          # failed release rather than a failed PR; catch it here instead.
+          keys = list(manifest)
+          expected = ["domain", "name"] + sorted(k for k in manifest if k not in ("domain", "name"))
+          assert keys == expected, f"manifest keys must be sorted: {expected}"
+
           strings = json.loads((component / "strings.json").read_text())
           english = json.loads((component / "translations/en.json").read_text())
           assert strings == english, "translations/en.json is out of sync with strings.json"
