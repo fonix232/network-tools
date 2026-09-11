@@ -14,3 +14,7 @@ unraid/docker-model/dist/
 
 # OS
 .DS_Store
+
+# Tool caches
+.ruff_cache/
+.pytest_cache/

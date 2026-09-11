@@ -1,0 +1,81 @@
+name: CI homeassistant/matterbook
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'homeassistant/matterbook/**'
+      - '.github/workflows/ci-ha-matterbook.yml'
+  pull_request:
+    paths:
+      - 'homeassistant/matterbook/**'
+      - '.github/workflows/ci-ha-matterbook.yml'
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: homeassistant/matterbook
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Home Assistant 2026.x runs on 3.13; the modules under test are pure
+          # Python and import nothing from Home Assistant, so no HA install is
+          # needed to run them.
+          python-version: '3.13'
+
+      - name: Install tooling
+        run: pip install --disable-pip-version-check ruff==0.15.8 pytest
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: python -m pytest tests -q
+
+      - name: Validate integration metadata
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          component = Path("custom_components/matterbook")
+          manifest = json.loads((component / "manifest.json").read_text())
+
+          # HACS requires each of these on a custom integration.
+          for key in ("domain", "name", "version", "documentation", "issue_tracker", "codeowners"):
+              assert manifest.get(key), f"manifest.json is missing {key}"
+
+          strings = json.loads((component / "strings.json").read_text())
+          english = json.loads((component / "translations/en.json").read_text())
+          assert strings == english, "translations/en.json is out of sync with strings.json"
+
+          # Every entity translation key must exist, or the UI shows raw keys.
+          import re
+
+          # Entity translation keys are declared in three shapes across the
+          # platforms; miss one and the UI shows a raw key instead of a name.
+          patterns = (
+              r'super\(\).__init__\(coordinator, "([a-z_]+)"\)',  # button, switch
+              r'^\s*\("([a-z_]+)", \d+\),',                        # text field table
+              r'translation_key="([a-z_]+)"',                        # sensor descriptions
+              r'^[A-Z_]+_KEY = "([a-z_]+)"',                         # number
+          )
+          keys = set()
+          for path in component.glob("*.py"):
+              content = path.read_text()
+              for pattern in patterns:
+                  keys.update(re.findall(pattern, content, re.MULTILINE))
+          translated = {
+              key
+              for platform in strings["entity"].values()
+              for key in platform
+          }
+          missing = keys - translated
+          assert not missing, f"entity keys without a translation: {sorted(missing)}"
+          print("metadata ok")
+          PY

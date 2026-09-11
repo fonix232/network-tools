@@ -11,6 +11,9 @@ Standalone tooling repository for platform-specific infrastructure plugins and i
   - `komodo-periphery/` - Native Unraid plugin (PLG + txz payload).
   - `git-crypt/` - Unraid plugin for `git-crypt` binary management.
   - `docker-model/` - Docker Model Runner CLI plugin (compiled from source in CI).
+- `homeassistant/`
+  - `matterbook/` - Home Assistant custom integration: a book of Matter setup
+    codes, and automatic commissioning of the devices in it.
 - `truenas/`
   - `komodo-periphery/` - TrueNAS SCALE self-extracting sysext installers.
   - `git-crypt/` - TrueNAS SCALE self-extracting sysext installers.
@@ -30,6 +33,10 @@ Each plugin has its own workflow and trigger scope:
 Shared logic lives in:
 
 - `reusable-build-release.yml`
+
+`homeassistant/matterbook` is not a plugin build: it is Python that ships as
+source, so it has a lint-and-test workflow (`ci-ha-matterbook.yml`) instead of a
+build/release one.
 
 Release notes are generated from the triggering commit message body.
 
