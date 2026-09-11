@@ -1,0 +1,113 @@
+name: Release homeassistant/matterbook
+
+# Builds the installable integration package and attaches it to a release.
+#
+# The archive holds the *contents* of custom_components/matterbook at its root,
+# which is the layout HACS expects from a `zip_release`: it extracts the archive
+# straight into <config>/custom_components/matterbook/. The same layout is what a
+# manual installer wants to unzip into that directory, so one artifact serves
+# both.
+
+on:
+  push:
+    tags:
+      - 'ha-matterbook-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, e.g. 0.1.0 (no release is published)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: homeassistant/matterbook
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#ha-matterbook-v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
+
+      - name: Check the manifest agrees with the tag
+        run: |
+          manifest=$(python3 -c "import json;print(json.load(open('custom_components/matterbook/manifest.json'))['version'])")
+          if [ "$manifest" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::manifest.json says $manifest but the tag says ${{ steps.version.outputs.version }}."
+            echo "::error::Home Assistant and HACS both read the manifest, so they must match."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: homeassistant/matterbook/panel/package-lock.json
+
+      - name: Build the panel
+        working-directory: homeassistant/matterbook/panel
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Lint and test
+        run: |
+          pip install --disable-pip-version-check ruff==0.15.8 pytest
+          ruff check .
+          python -m pytest tests -q
+
+      - name: Package the integration
+        run: |
+          cd custom_components/matterbook
+          # Compiled bytecode and editor droppings must not ship.
+          find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+          zip -r "${{ runner.temp }}/matterbook.zip" . -x '*.DS_Store'
+          unzip -l "${{ runner.temp }}/matterbook.zip"
+
+      - name: Sanity-check the archive layout
+        run: |
+          cd "${{ runner.temp }}"
+          # HACS extracts into custom_components/matterbook/, so manifest.json has
+          # to sit at the archive root — a nested directory would install broken.
+          if ! unzip -l matterbook.zip | grep -qE ' manifest\.json$'; then
+            echo "::error::manifest.json is not at the root of the archive."
+            exit 1
+          fi
+          if ! unzip -l matterbook.zip | grep -q 'panel/matterbook-panel.js'; then
+            echo "::error::The panel bundle is missing from the archive."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matterbook-${{ steps.version.outputs.version }}
+          path: ${{ runner.temp }}/matterbook.zip
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "MatterBook ${{ steps.version.outputs.version }}" \
+            --notes "$(git log -1 --pretty=%B)" \
+            "${{ runner.temp }}/matterbook.zip#matterbook.zip"
