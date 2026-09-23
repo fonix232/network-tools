@@ -1,0 +1,32 @@
+[Unit]
+Description=Beszel agent (network-tools/beszel-agent)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Everything on /data: UniFi OS firmware updates wipe /usr, /var and /opt.
+EnvironmentFile=/data/custom/beszel-agent/env
+ExecStart=/data/custom/beszel-agent/beszel-agent
+Restart=always
+RestartSec=10
+# If the gateway runs out of memory, lose the monitor before DNS or unifi-core.
+OOMScoreAdjust=500
+
+# Root, but with no capabilities: a static service user would live in
+# /etc/passwd, which firmware updates don't preserve, and a DynamicUser can't
+# own the fingerprint in /data.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/data/custom/beszel-agent/data
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+KeyringMode=private
+
+[Install]
+WantedBy=multi-user.target
