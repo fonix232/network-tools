@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-assert CrowdSec firewall rules after UniFi provisions (network-tools/odin/crowdsec-bouncer)
+
+[Service]
+Type=oneshot
+ExecStart=/data/custom/crowdsec-bouncer/crowdsec-rules.sh ensure
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=yes
+PrivateTmp=yes

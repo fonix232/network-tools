@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-assert CrowdSec firewall rules every minute (network-tools/odin/crowdsec-bouncer)
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

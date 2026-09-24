@@ -1,0 +1,35 @@
+[Unit]
+Description=CrowdSec firewall bouncer (network-tools/odin/crowdsec-bouncer)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# Everything on /data: UniFi OS firmware updates wipe /usr, /var and /opt.
+# The bouncer only fills the ipsets (mode: ipset); crowdsec-rules.sh owns the
+# sets and the DROP rules. LAPI is reached by IP, so no DNS dependency, and
+# nothing here sits on udm-boot's path to starting AGH.
+ExecStartPre=/data/custom/crowdsec-bouncer/crowdsec-rules.sh prestart
+ExecStart=/data/custom/crowdsec-bouncer/crowdsec-firewall-bouncer -c /data/custom/crowdsec-bouncer/crowdsec-firewall-bouncer.yaml
+Restart=always
+RestartSec=10
+# If the gateway runs out of memory, lose the bouncer before DNS or unifi-core.
+OOMScoreAdjust=500
+
+# Root, because a static service user would live in /etc/passwd, which
+# firmware updates don't preserve; but only the netfilter capabilities.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+# iptables takes /run/xtables.lock
+ReadWritePaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+KeyringMode=private
+
+[Install]
+WantedBy=multi-user.target
