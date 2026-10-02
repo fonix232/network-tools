@@ -1,3 +1,14 @@
+# Assembles the komodo-periphery .plg.
+#
+#   docker compose run --rm build
+#
+# VERSION defaults to today's date (set by the builder entrypoint); CI passes
+# the release version.
+
+# Distinct project name: truenas/komodo-periphery would otherwise share the
+# default directory-derived name and clobber this builder image locally.
+name: unraid-komodo-periphery
+
 services:
   build:
     build:
@@ -7,4 +18,4 @@ services:
     volumes:
       - ../..:/workspace
     environment:
-      BUILD_COMMAND: python3 unraid/komodo-periphery/assemble.py --version "$$VERSION" --output unraid/komodo-periphery/komodo-periphery.plg
+      BUILD_COMMAND: python3 unraid/common/assemble.py --version "$$VERSION" --plugin-dir unraid/komodo-periphery --output unraid/komodo-periphery/komodo-periphery.plg

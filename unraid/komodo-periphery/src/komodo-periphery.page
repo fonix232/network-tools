@@ -299,7 +299,7 @@ function kpSaveConfig() {
 <div class="pluginUpdate">
   <p>The Periphery binary has not been downloaded yet. Enter a release tag and click <strong>Install</strong>.</p>
   <p>
-    Version tag:&nbsp;<input type="text" id="kp-tag" style="width:12em" placeholder="e.g. v2.2.0">
+    Version tag:&nbsp;<input type="text" id="kp-tag" style="width:12em" placeholder="e.g. v2.3.3">
     &nbsp;<input type="button" value="Install" onclick="kpInstall('kp-tag', this)">
     &nbsp;<input type="button" value="Load release list" onclick="kpLoadReleases(this)">
   </p>
