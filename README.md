@@ -4,6 +4,8 @@ Standalone tooling repository for platform-specific infrastructure plugins and i
 
 ## Structure
 
+- `bookorbit/`
+  - Anna’s Archive file/torrent indexers and a Jackett-derived AudioBook Bay magnet indexer for BookOrbit; see [installation and limitations](bookorbit/README.md).
 - `.github/workflows/`
   - Per-plugin GitHub Actions workflows.
   - Uses a shared reusable workflow for common build/release logic.
