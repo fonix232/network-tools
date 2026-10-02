@@ -1,3 +1,14 @@
+# Assembles the git-crypt .plg.
+#
+#   docker compose run --rm build
+#
+# VERSION defaults to today's date (set by the builder entrypoint); CI passes
+# the release version.
+
+# Distinct project name: truenas/git-crypt would otherwise share the default
+# directory-derived name and clobber this builder image locally.
+name: unraid-git-crypt
+
 services:
   build:
     build:
@@ -7,4 +18,5 @@ services:
     volumes:
       - ../..:/workspace
     environment:
-      BUILD_COMMAND: python3 unraid/git-crypt/assemble.py --version "$$VERSION" --output unraid/git-crypt/git-crypt.plg
+      VERSION: ${VERSION:-}
+      BUILD_COMMAND: python3 unraid/common/assemble.py --version "$$VERSION" --plugin-dir unraid/git-crypt --output unraid/git-crypt/git-crypt.plg
