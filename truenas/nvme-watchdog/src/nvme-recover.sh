@@ -25,11 +25,14 @@ if [[ -z "$ARG1" || -z "$DEV_PATH" ]]; then
     exit 1
 fi
 
+# Full domain:bus:dev.fn (e.g. 0000:c5:00.0) — already includes the domain.
 PCI_ADDR=$(printf '%s' "$DEV_PATH" | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]' | tail -1)
 if [[ -z "$PCI_ADDR" ]]; then
     log "ERROR: could not extract PCI address from devpath: $DEV_PATH"
     exit 1
 fi
+
+PCI_PATH="/sys/bus/pci/devices/${PCI_ADDR}"
 
 # Serialize per device — udev remove+partition events and the cron poller may
 # all fire for the same controller.
@@ -47,10 +50,12 @@ log "recovery triggered: $ARG1 at $PCI_ADDR"
 #   - controller reset failure: device is on the bus but wedged; must remove
 #     from PCIe to force controller reinitialization
 sleep 2
-if [[ -e "/sys/bus/pci/devices/0000:${PCI_ADDR}/remove" ]]; then
-    echo 1 > "/sys/bus/pci/devices/0000:${PCI_ADDR}/remove" 2>/dev/null || true
+if [[ -e "${PCI_PATH}/remove" ]]; then
+    echo 1 > "${PCI_PATH}/remove" 2>/dev/null || true
     sleep 1
 fi
+# Global bus rescan, not "${PCI_PATH}/rescan": writing to remove above deletes the
+# device from sysfs, so its own rescan attribute is gone by the time we get here.
 echo 1 > /sys/bus/pci/rescan
 log "PCI bus rescanned"
 
@@ -58,7 +63,7 @@ log "PCI bus rescanned"
 NEW_CTRL=""
 for i in $(seq 1 15); do
     sleep 2
-    NEW_CTRL=$(ls "/sys/bus/pci/devices/0000:${PCI_ADDR}/nvme/" 2>/dev/null | head -1)
+    NEW_CTRL=$(ls "${PCI_PATH}/nvme/" 2>/dev/null | head -1)
     [[ -n "$NEW_CTRL" ]] && { log "${NEW_CTRL} re-enumerated at ${PCI_ADDR} after $((i * 2))s"; break; }
 done
 
@@ -74,7 +79,7 @@ fi
 #   - a wedged controller can re-enumerate on PCIe yet still fail Identify
 #     (capacity stays 0). Touching the pool then makes things WORSE (ZFS
 #     faults the vdevs). Verify readability first; bail out loudly if dead.
-RESCAN_PATH="/sys/class/nvme/${NEW_CTRL}/rescan_controller"
+RESCAN_PATH="${PCI_PATH}/rescan_controller"
 [[ -w "$RESCAN_PATH" ]] && echo 1 > "$RESCAN_PATH"
 
 NS_DEV="/dev/${NEW_CTRL}"
