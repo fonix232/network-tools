@@ -18,4 +18,5 @@ services:
     volumes:
       - ../..:/workspace
     environment:
+      VERSION: ${VERSION:-}
       BUILD_COMMAND: python3 unraid/common/assemble.py --version "$$VERSION" --plugin-dir unraid/komodo-periphery --output unraid/komodo-periphery/komodo-periphery.plg
