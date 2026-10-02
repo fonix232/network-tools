@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'truenas/komodo-periphery/**'
+      - 'versions.env'
       - 'truenas/common/**'
       - '.github/workflows/build-truenas-komodo-periphery.yml'
       - '.github/workflows/reusable-build-release.yml'
