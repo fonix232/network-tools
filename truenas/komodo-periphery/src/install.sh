@@ -1,18 +1,85 @@
 #!/bin/bash
-# Komodo Periphery -- TrueNAS SCALE self-extracting installer.
+# Komodo Periphery -- TrueNAS SCALE self-extracting installer / updater.
 #
 # The periphery sysext (.raw squashfs) is base64-encoded below __PAYLOAD__.
 # Config, service unit, and extension metadata are all baked into the image.
 #
-# Built via: docker compose run --rm build  (tools/truenas/komodo-periphery/)
-# Deploy:    scp output/komodo-periphery-*.run <host>:/tmp/
+# Built via: docker compose run --rm build  (truenas/komodo-periphery/)
+# Install:   scp output/komodo-periphery-*.run <host>:/tmp/
 #            ssh <host> bash /tmp/komodo-periphery-*.run
+# Update:    ssh <host> bash /tmp/komodo-periphery-*.run --update
 
 set -euo pipefail
 
+# Komodo release carried by this installer, baked in at build time from the
+# KOMODO_VERSION pin in the repo-root versions.env.
+EMBEDDED_TAG="__UPSTREAM_VERSION__"
+EMBEDDED_VERSION="${EMBEDDED_TAG#v}"
+
 RAW=/var/lib/extensions/komodo-periphery.raw
+VERSION_FILE=/var/lib/extensions/komodo-periphery.version
 CONFIG_DIR=/etc/komodo
 CONFIG_FILE=$CONFIG_DIR/periphery.config.toml
+
+MODE=install
+FORCE=false
+
+usage() {
+    cat <<USAGE
+Komodo Periphery ${EMBEDDED_VERSION} -- TrueNAS SCALE installer
+
+Usage: bash $(basename "$0") [option]
+
+  (no option)      Interactive first install: creates the config dataset,
+                   prompts for Core key / IP / stacks dir, installs and starts.
+  -u, --update     Non-interactive in-place update. Swaps the sysext for the
+                   version carried by this installer and restarts the service.
+                   ${CONFIG_FILE} and the Noise keys are left untouched.
+  -c, --check      Report the installed version against this installer's (and
+                   the newest upstream release, if GitHub is reachable), then
+                   exit without changing anything.
+  -f, --force      With --update: reinstall or downgrade even when the
+                   installed version is the same or newer.
+  -V, --version    Print the Komodo version carried by this installer.
+  -h, --help       This text.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -u|--update)  MODE=update ;;
+        -c|--check)   MODE=check ;;
+        -f|--force)   FORCE=true ;;
+        -V|--version) printf '%s\n' "$EMBEDDED_VERSION"; exit 0 ;;
+        -h|--help)    usage; exit 0 ;;
+        *)            echo "ERROR: unknown argument: $1" >&2; echo "" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# Version recorded at install time, falling back to asking the binary.
+installed_version() {
+    local probed
+    if [ -f "$VERSION_FILE" ]; then
+        tr -d '[:space:]' < "$VERSION_FILE"
+        return 0
+    fi
+    if [ -x /usr/bin/periphery ]; then
+        probed="$(/usr/bin/periphery --version 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+        if [ -n "$probed" ]; then
+            printf '%s' "$probed"
+            return 0
+        fi
+    fi
+    return 0
+}
+
+# True when $1 sorts strictly before $2 as a dotted version.
+version_lt() {
+    [ "$1" != "$2" ] &&
+        [ "$(printf '%s\n%s\n' "$1" "$2" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "$1" ]
+}
 
 # -- Probe --------------------------------------------------------------------
 
@@ -27,28 +94,98 @@ if ! command -v systemd-sysext &>/dev/null; then
 fi
 systemd-sysext --version
 
-# -- ZFS pool scan ------------------------------------------------------------
+# -- Version report -----------------------------------------------------------
+
+_installed="$(installed_version)"
 
 echo ""
-echo "=== Scanning ZFS pools ==="
-_mounts=()
-if command -v zpool &>/dev/null; then
-    while IFS= read -r _pool; do
-        _mp="/mnt/$_pool"
-        if [ -d "$_mp" ]; then
-            _mounts+=("\"$_mp\"")
-            echo "  Found: $_mp"
+echo "=== Versions ==="
+echo "  This installer carries: $EMBEDDED_VERSION"
+echo "  Currently installed:    ${_installed:-none}"
+
+if [ "$MODE" = check ]; then
+    _latest="$(curl -fsSL --max-time 10 \
+        https://api.github.com/repos/moghtech/komodo/releases/latest 2>/dev/null \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n1 || true)"
+    if [ -n "${_latest:-}" ]; then
+        echo "  Newest upstream:        ${_latest#v}"
+    else
+        echo "  Newest upstream:        (GitHub unreachable)"
+    fi
+
+    echo ""
+    if [ ! -f "$RAW" ] || [ -z "$_installed" ]; then
+        echo "Not installed yet. Run without options for an interactive install."
+    elif [ "$_installed" = "$EMBEDDED_VERSION" ]; then
+        echo "Up to date on $_installed."
+    elif version_lt "$_installed" "$EMBEDDED_VERSION"; then
+        echo "Update available: $_installed -> $EMBEDDED_VERSION."
+        echo "Apply it with: bash $(basename "$0") --update"
+    else
+        echo "Installed $_installed is newer than this installer's $EMBEDDED_VERSION."
+    fi
+    if [ -n "${_latest:-}" ] && version_lt "$EMBEDDED_VERSION" "${_latest#v}"; then
+        echo ""
+        echo "Note: Komodo ${_latest#v} is published but this installer carries"
+        echo "      $EMBEDDED_VERSION. Bump KOMODO_VERSION in versions.env and rebuild"
+        echo "      once Core is on the newer release."
+    fi
+    exit 0
+fi
+
+# -- Update preflight ---------------------------------------------------------
+
+if [ "$MODE" = update ]; then
+    if [ ! -f "$RAW" ]; then
+        echo ""
+        echo "ERROR: no existing install found ($RAW is missing)." >&2
+        echo "       Run without --update for a first install." >&2
+        exit 1
+    fi
+    if [ "$FORCE" != true ] && [ -n "$_installed" ]; then
+        if [ "$_installed" = "$EMBEDDED_VERSION" ]; then
+            echo ""
+            echo "Already on $_installed -- nothing to do (--force to reinstall)."
+            exit 0
         fi
-    done < <(zpool list -H -o name 2>/dev/null)
+        if version_lt "$EMBEDDED_VERSION" "$_installed"; then
+            echo ""
+            echo "ERROR: installed $_installed is newer than this installer's $EMBEDDED_VERSION." >&2
+            echo "       Use --force to downgrade." >&2
+            exit 1
+        fi
+    fi
+    echo ""
+    echo "=== Updating ${_installed:-unknown} -> $EMBEDDED_VERSION ==="
+    echo "  Keeping $CONFIG_FILE and the Noise keys in $CONFIG_DIR."
 fi
-if [ "${#_mounts[@]}" -eq 0 ]; then
-    _mounts=('"/mnt"')
-    echo "  No ZFS pools found, defaulting to [\"/mnt\"]"
-fi
+
+# -- ZFS pool scan ------------------------------------------------------------
+# Only needed to seed include_disk_mounts in a freshly written config.
+
 _mounts_toml=""
-for _m in "${_mounts[@]}"; do
-    _mounts_toml="${_mounts_toml:+$_mounts_toml, }$_m"
-done
+if [ "$MODE" = install ]; then
+    echo ""
+    echo "=== Scanning ZFS pools ==="
+    _mounts=()
+    if command -v zpool &>/dev/null; then
+        while IFS= read -r _pool; do
+            _mp="/mnt/$_pool"
+            if [ -d "$_mp" ]; then
+                _mounts+=("\"$_mp\"")
+                echo "  Found: $_mp"
+            fi
+        done < <(zpool list -H -o name 2>/dev/null)
+    fi
+    if [ "${#_mounts[@]}" -eq 0 ]; then
+        _mounts=('"/mnt"')
+        echo "  No ZFS pools found, defaulting to [\"/mnt\"]"
+    fi
+    for _m in "${_mounts[@]}"; do
+        _mounts_toml="${_mounts_toml:+$_mounts_toml, }$_m"
+    done
+fi
 
 # -- Setup persistent config dataset -----
 
@@ -79,17 +216,20 @@ echo "OK: config dataset ready at /etc/komodo"
 
 # -- Config check --------------------------------------------------------
 
-echo ""
-echo "=== Config ==="
-_write_config=true
-if [ -f "$CONFIG_FILE" ]; then
-    echo "Existing config found: $CONFIG_FILE"
-    read -rp "Override it? [y/N] " _override
-    if [[ "$_override" =~ ^[Yy]$ ]]; then
-        _write_config=true
-    else
-        _write_config=false
-        echo "Keeping existing config."
+_write_config=false
+if [ "$MODE" = install ]; then
+    echo ""
+    echo "=== Config ==="
+    _write_config=true
+    if [ -f "$CONFIG_FILE" ]; then
+        echo "Existing config found: $CONFIG_FILE"
+        read -rp "Override it? [y/N] " _override
+        if [[ "$_override" =~ ^[Yy]$ ]]; then
+            _write_config=true
+        else
+            _write_config=false
+            echo "Keeping existing config."
+        fi
     fi
 fi
 
@@ -111,12 +251,22 @@ fi
 _marker=$(grep -n '^__PAYLOAD__$' "$0" | cut -d: -f1)
 [ -n "$_marker" ] || { echo "ERROR: payload marker not found -- was this script assembled by the Dockerfile?" >&2; exit 1; }
 
+if [ "$MODE" = update ]; then
+    # The running process keeps the old sysext inode open, so it has to go
+    # before the image is swapped and systemd-sysext refreshed.
+    echo ""
+    echo "=== Stopping komodo-periphery for the swap ==="
+    systemctl stop komodo-periphery 2>/dev/null || true
+fi
+
 echo ""
 echo "=== Installing sysext ==="
 mkdir -p /var/lib/extensions
-tail -n +$((_marker + 1)) "$0" | base64 -d > "$RAW"
-[ -s "$RAW" ] || { echo "ERROR: extracted .raw is empty." >&2; exit 1; }
-echo "OK: $RAW ($(du -sh "$RAW" | cut -f1))"
+tail -n +$((_marker + 1)) "$0" | base64 -d > "$RAW.new"
+[ -s "$RAW.new" ] || { rm -f "$RAW.new"; echo "ERROR: extracted .raw is empty." >&2; exit 1; }
+mv -f "$RAW.new" "$RAW"
+printf '%s\n' "$EMBEDDED_VERSION" > "$VERSION_FILE"
+echo "OK: $RAW ($(du -sh "$RAW" | cut -f1)) -- version $EMBEDDED_VERSION"
 
 # -- Activate sysext ----------------------------------------------------------
 
@@ -243,6 +393,20 @@ fi
 echo ""
 echo "=== Starting komodo-periphery ==="
 systemctl enable --now komodo-periphery
+
+# -- Update: report and stop here ---------------------------------------------
+# The node is already paired, so there is no key to print and no config to
+# nudge the operator about.
+
+if [ "$MODE" = update ]; then
+    echo ""
+    systemctl --no-pager --lines=0 status komodo-periphery || true
+    echo ""
+    echo "=== Done: updated to $EMBEDDED_VERSION ==="
+    echo "  Config kept: $CONFIG_FILE"
+    echo "  Logs:        journalctl -u komodo-periphery -n 50"
+    exit 0
+fi
 
 # -- Print periphery public key -----------------------------------------------
 

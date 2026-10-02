@@ -1,9 +1,12 @@
-# Builds self-extracting sysext installers for the last N Komodo releases.
+# Builds a self-extracting sysext installer for the pinned Komodo release.
 #
 #   docker compose run --rm build
 #
-# Override defaults:
-#   RELEASE_COUNT=3 PERIPHERY_ARCH=aarch64 docker compose run --rm build
+# The version comes from KOMODO_VERSION in the repo-root versions.env.
+# Override:
+#   KOMODO_VERSION=v2.2.0 docker compose run --rm build   # build another tag
+#   RELEASE_COUNT=3 docker compose run --rm build          # ignore the pin
+#   PERIPHERY_ARCH=aarch64 docker compose run --rm build
 
 services:
   build:
@@ -15,7 +18,8 @@ services:
       - ../..:/workspace:ro
       - ./output:/output
     environment:
-      RELEASE_COUNT: ${RELEASE_COUNT:-6}
+      KOMODO_VERSION: ${KOMODO_VERSION:-}
+      RELEASE_COUNT: ${RELEASE_COUNT:-}
       PERIPHERY_ARCH: ${PERIPHERY_ARCH:-x86_64}
       PLUGIN_BUILD_SCRIPT: truenas/komodo-periphery/src/build.sh
       INSTALL_TEMPLATE_PATH: /workspace/truenas/komodo-periphery/src/install.sh
