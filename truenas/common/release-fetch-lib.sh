@@ -1,7 +1,34 @@
 #!/bin/sh
-# Shared release tag fetching helpers for build scripts.
+# Shared version-pin and release-tag helpers for build scripts.
 
 set -eu
+
+# Read a pinned version out of a versions.env-style pin file.
+# Blank lines, comment lines and trailing `# renovate: ...` annotations are
+# ignored, so the value is whatever sits between `=` and the first space or
+# `#`.
+# Args:
+#   $1 = variable name (e.g. KOMODO_VERSION)
+#   $2 = pin file (default: /workspace/versions.env)
+read_version_pin() {
+    var_name="$1"
+    pin_file="${2:-/workspace/versions.env}"
+
+    if [ ! -f "$pin_file" ]; then
+        echo "ERROR: version pin file not found: $pin_file" >&2
+        return 1
+    fi
+
+    pin_value="$(sed -n "s/^[[:space:]]*${var_name}=\([^#[:space:]][^#[:space:]]*\).*/\1/p" \
+        "$pin_file" | head -n 1)"
+
+    if [ -z "$pin_value" ]; then
+        echo "ERROR: no pin for ${var_name} in ${pin_file}" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$pin_value"
+}
 
 # Fetch stable tags from GitHub releases, deduplicated by major.minor.
 # Args:

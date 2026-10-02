@@ -4,11 +4,16 @@ Standalone tooling repository for platform-specific infrastructure plugins and i
 
 ## Structure
 
+- `versions.env`
+  - Single authoritative pin per upstream project, read by every platform's builder.
+  - Renovate keeps the values current; see [Version Pinning](#version-pinning).
 - `bookorbit/`
   - Anna’s Archive file/torrent indexers and a Jackett-derived AudioBook Bay magnet indexer for BookOrbit; see [installation and limitations](bookorbit/README.md).
 - `.github/workflows/`
   - Per-plugin GitHub Actions workflows.
   - Uses a shared reusable workflow for common build/release logic.
+- `.github/renovate.json`
+  - Renovate configuration, including the custom manager that reads `versions.env`.
 - `unraid/`
   - `komodo-periphery/` - Native Unraid plugin (PLG + txz payload).
   - `git-crypt/` - Unraid plugin for `git-crypt` binary management.
@@ -34,6 +39,30 @@ Shared logic lives in:
 - `reusable-build-release.yml`
 
 Release notes are generated from the triggering commit message body.
+
+## Version Pinning
+
+Upstream versions are not discovered at build time. `versions.env` holds one
+authoritative value per project:
+
+```
+KOMODO_VERSION=v2.3.3 # renovate: datasource=github-releases depName=moghtech/komodo
+```
+
+Both Komodo Periphery installers build against that single pin:
+
+- `truenas/komodo-periphery/src/build.sh` reads it via `read_version_pin`
+  (`truenas/common/release-fetch-lib.sh`) and bakes the tag into the `.run`.
+- `unraid/common/assemble_lib.py` resolves it through the plugin manifest's
+  `version_pins` block and substitutes `__KOMODO_VERSION__` into the `.plg`,
+  `api.php` and the web UI page.
+
+Renovate's custom manager in `.github/renovate.json` matches the inline
+`# renovate: ...` annotation, so bumping a pin takes one PR and rebuilds both
+installers. Adding a new pin needs no Renovate change — just the annotation.
+
+Komodo Core and every Periphery node must run the same release, so a
+`KOMODO_VERSION` bump here goes together with the Core deployment.
 
 ## Local Development
 
