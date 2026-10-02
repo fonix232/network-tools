@@ -1,7 +1,7 @@
 <?xml version='1.0' standalone='yes'?>
 <!DOCTYPE PLUGIN [
   <!ENTITY name       "docker-model">
-  <!ENTITY version    "2026.08.01">
+  <!ENTITY version    "2026.10.02">
   <!ENTITY plugin_dir "/boot/config/plugins/docker-model">
 ]>
 <PLUGIN name="&name;"
@@ -11,8 +11,8 @@
         min="6.12.0">
 
 <CHANGES>
-### 2026.08.01
-- Docker Model Runner CLI plugin (`docker model`), bundles v1.2.6 compiled from source in CI
+### 2026.10.02
+- Docker Model Runner CLI plugin (`docker model`), bundles v1.2.8 compiled from source in CI
 - Binary is pinned to this plugin release, cached on flash, restored on every array start
 - The inference server itself runs as a container that `docker model install-runner` creates
   (also runs implicitly on first use); models persist in a docker volume
@@ -48,13 +48,13 @@ CACHED="$PLUGIN_DIR/docker-model"
 INSTALL_DIR="/usr/local/lib/docker/cli-plugins"
 # Binary is a release asset on this plugin version's own release tag,
 # so plugin version and binary version always move together.
-URL="https://github.com/fonix232/network-tools/releases/download/unraid-docker-model-2026.08.01/docker-model"
+URL="https://github.com/fonix232/network-tools/releases/download/unraid-docker-model-2026.10.02/docker-model"
 
 mkdir -p "$PLUGIN_DIR"
 mkdir -p "/usr/local/emhttp/plugins/docker-model/event"
 
-if [ -f "$CACHED" ] && [ "$(cat "$PLUGIN_DIR/version" 2>/dev/null)" = "2026.08.01" ]; then
-    echo "docker-model: cached binary for 2026.08.01 present, skipping download"
+if [ -f "$CACHED" ] && [ "$(cat "$PLUGIN_DIR/version" 2>/dev/null)" = "2026.10.02" ]; then
+    echo "docker-model: cached binary for 2026.10.02 present, skipping download"
 else
     echo "docker-model: downloading $URL"
     curl -fsSL --retry 3 "$URL" -o /tmp/docker-model || {
@@ -63,7 +63,7 @@ else
     }
     install -m 0755 /tmp/docker-model "$CACHED"
     rm -f /tmp/docker-model
-    echo "2026.08.01" > "$PLUGIN_DIR/version"
+    echo "2026.10.02" > "$PLUGIN_DIR/version"
 fi
 
 mkdir -p "$INSTALL_DIR"
