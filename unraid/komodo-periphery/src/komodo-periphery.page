@@ -18,6 +18,15 @@ $kp_PIDFILE    = '/var/run/komodo-periphery.pid';
 $kp_LOGFILE    = '/var/log/komodo-periphery.log';
 $kp_VER_FILE   = "$kp_PLUGIN_DIR/version";
 
+// Release this plugin build targets, substituted from the KOMODO_VERSION pin
+// in the repo-root versions.env at assembly time. Because it is baked in, the
+// "is an update available" question is answered with no network access: a
+// plugin update is what delivers a new target version.
+$kp_PINNED = '__KOMODO_VERSION__';
+if (strncmp($kp_PINNED, '__', 2) === 0) $kp_PINNED = '';
+// Release tags carry a v prefix; accept a pin written without one.
+if ($kp_PINNED !== '' && ctype_digit($kp_PINNED[0])) $kp_PINNED = 'v' . $kp_PINNED;
+
 function kp_h(string $s): string {
     return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
 }
@@ -84,8 +93,15 @@ function kp_tail_sections(string $raw): string {
     return implode("\n", $result);
 }
 
+// Compare release tags ignoring the v prefix.
+function kp_cmp(string $a, string $b): int {
+    return version_compare(ltrim($a, 'vV'), ltrim($b, 'vV'));
+}
+
 $kp_inst_ver  = file_exists($kp_VER_FILE) ? trim(file_get_contents($kp_VER_FILE)) : '';
 $kp_binary_ok = file_exists($kp_BINARY) && $kp_inst_ver !== '';
+// Installed binary older than the release this plugin build pins.
+$kp_pin_newer = $kp_PINNED !== '' && $kp_inst_ver !== '' && kp_cmp($kp_inst_ver, $kp_PINNED) < 0;
 $kp_cfg_raw   = kp_read_cfg($kp_LIVE_CFG, $kp_FLASH_CFG);
 $kp_paired    = kp_is_paired($kp_cfg_raw);
 $kp_state     = !$kp_binary_ok ? 'NOT_INSTALLED' : (!$kp_paired ? 'NOT_PAIRED' : 'READY');
@@ -217,6 +233,19 @@ function kpInstall(tagInputId, btn) {
     kpCall({action:'install',tag:tag,csrf_token:kpCsrf()}, btn);
 }
 
+// Install the release this plugin build targets. Omitting the tag makes
+// api.php fall back to the pinned version.
+function kpInstallPinned(btn) {
+    kpCall({action:'install'}, btn);
+}
+
+// Swap the binary to a target version, preserving config and keys.
+function kpUpdate(tag, btn) {
+    var data = {action:'update'};
+    if (tag) data.tag = tag;
+    kpCall(data, btn);
+}
+
 function kpLoadReleases(btn) {
     var orig=btn.value; btn.disabled=true; btn.value='Loading\u2026';
     fetch(KP_API+'?action=releases')
@@ -226,7 +255,8 @@ function kpLoadReleases(btn) {
         if (!j.ok||!j.tags||!j.tags.length){kpFlash(false,j.msg||'Could not fetch releases.');return;}
         var tbody=document.getElementById('kp-rel-body');
         tbody.innerHTML=j.tags.map(function(t,i){
-            return '<tr><td>'+t+(i===0?' <em>(latest)</em>':'')+
+            var notes=(i===0?' <em>(latest)</em>':'')+(t===j.pinned?' <em>(plugin target)</em>':'');
+            return '<tr><td>'+t+notes+
                    '</td><td><input type="button" value="Install" onclick="document.getElementById(\'kp-tag\').value=\''+t+'\';kpInstall(\'kp-tag\',this)"></td></tr>';
         }).join('');
         document.getElementById('kp-rel-list').style.display='';
@@ -234,21 +264,43 @@ function kpLoadReleases(btn) {
     .catch(function(e){btn.disabled=false;btn.value=orig;kpFlash(false,'Failed: '+e);});
 }
 
+// Reports three things: what is installed, what this plugin build targets
+// (offline, baked in at assembly time), and what upstream has published
+// (needs GitHub, best-effort).
 function kpCheckUpdates(btn) {
-    var orig=btn.value; btn.disabled=true; btn.value='Loading\u2026';
-    fetch(KP_API+'?action=releases')
+    var orig=btn.value; btn.disabled=true; btn.value='Checking\u2026';
+    fetch(KP_API+'?action=check_update')
     .then(function(r){return r.json();})
     .then(function(j){
         btn.disabled=false; btn.value=orig;
-        if (!j.ok||!j.tags||!j.tags.length){kpFlash(false,j.msg||'Could not fetch releases.');return;}
-        var inst=document.getElementById('kp-inst-ver').textContent.trim();
-        var sel=document.getElementById('kp-ver-sel');
-        sel.innerHTML=j.tags.map(function(t,i){
-            return '<option value="'+t+'"'+(t===inst?' selected':'')+'>'+t+(i===0?' (latest)':'')+' </option>';
-        }).join('');
-        document.getElementById('kp-ver-row').style.display='';
-        if(j.tags[0]!==inst) kpFlash(false,'Update available: '+j.tags[0]+' \u2014 installed: '+inst);
-        else kpFlash(true,'Up to date ('+inst+')');
+        if (!j.ok){kpFlash(false,j.msg||'Update check failed.');return;}
+
+        if (j.tags && j.tags.length) {
+            var sel=document.getElementById('kp-ver-sel');
+            sel.innerHTML=j.tags.map(function(t,i){
+                var label=t+(i===0?' (latest)':'')+(t===j.pinned?' (plugin target)':'');
+                return '<option value="'+t+'"'+(t===j.installed?' selected':'')+'>'+label+'</option>';
+            }).join('');
+            document.getElementById('kp-ver-row').style.display='';
+        }
+
+        var lines=['Installed: '+(j.installed||'none')];
+        if (j.pinned) lines.push('This plugin targets: '+j.pinned);
+        if (j.latest) lines.push('Latest upstream release: '+j.latest);
+        else if (j.msg) lines.push(j.msg);
+
+        if (j.pinned_update_available) {
+            lines.push('', 'Update available \u2014 click "Update to '+j.pinned+'".');
+            kpFlash(false, lines.join('\n'));
+        } else if (j.upstream_update_available) {
+            lines.push('', 'Komodo '+j.latest+' is published, but this plugin targets '+(j.pinned||j.installed)+'.');
+            lines.push('Update the plugin itself from the Plugins page to move the target,');
+            lines.push('or switch the binary manually below.');
+            kpFlash(false, lines.join('\n'));
+        } else {
+            lines.push('', 'Up to date.');
+            kpFlash(true, lines.join('\n'));
+        }
     })
     .catch(function(e){btn.disabled=false;btn.value=orig;kpFlash(false,'Failed: '+e);});
 }
@@ -297,9 +349,19 @@ function kpSaveConfig() {
 
 <div class="title kp-section"><span class="left">Install Komodo Periphery</span></div>
 <div class="pluginUpdate">
-  <p>The Periphery binary has not been downloaded yet. Enter a release tag and click <strong>Install</strong>.</p>
+  <?php if ($kp_PINNED !== ''): ?>
   <p>
-    Version tag:&nbsp;<input type="text" id="kp-tag" style="width:12em" placeholder="e.g. v2.3.3">
+    The Periphery binary has not been downloaded yet. This plugin targets
+    <strong><?= kp_h($kp_PINNED) ?></strong> &mdash; the version Komodo Core and
+    every other node should be on.
+  </p>
+  <p><input type="button" value="Install <?= kp_h($kp_PINNED) ?>" onclick="kpInstallPinned(this)"></p>
+  <p style="font-size:0.85em">Or pick a different release:</p>
+  <?php else: ?>
+  <p>The Periphery binary has not been downloaded yet. Enter a release tag and click <strong>Install</strong>.</p>
+  <?php endif; ?>
+  <p>
+    Version tag:&nbsp;<input type="text" id="kp-tag" style="width:12em" placeholder="e.g. v2.3.3" value="<?= kp_h($kp_PINNED) ?>">
     &nbsp;<input type="button" value="Install" onclick="kpInstall('kp-tag', this)">
     &nbsp;<input type="button" value="Load release list" onclick="kpLoadReleases(this)">
   </p>
@@ -336,8 +398,31 @@ function kpSaveConfig() {
     Status: <strong><?= $kp_status['running'] ? 'Running' : 'Stopped' ?></strong><?php if ($kp_status['pid']): ?> (PID <?= kp_h((string)$kp_status['pid']) ?>)<?php endif; ?>
     <?php if ($kp_state === 'READY'): ?> &mdash; Version: <strong id="kp-inst-ver"><?= kp_h($kp_inst_ver) ?></strong><?php endif; ?>
   </p>
+  <?php if ($kp_state !== 'NOT_INSTALLED' && $kp_PINNED !== ''): ?>
+  <p style="margin-top:0">This plugin targets: <strong><?= kp_h($kp_PINNED) ?></strong></p>
+  <?php endif; ?>
+
+  <?php if ($kp_pin_newer): ?>
+  <div class="notice notice-red" style="margin-bottom:10px">
+    <p style="margin:0">
+      <strong>Update available.</strong>
+      Periphery <?= kp_h($kp_inst_ver) ?> is installed; this plugin targets
+      <?= kp_h($kp_PINNED) ?>. The config and Noise keys in
+      <code>/etc/komodo</code> are preserved across the swap.
+    </p>
+    <p style="margin:6px 0 0">
+      <input type="button" value="Update to <?= kp_h($kp_PINNED) ?>" onclick="kpUpdate('', this)">
+    </p>
+  </div>
+  <?php endif; ?>
+
   <?php if ($kp_state === 'READY'): ?>
-  <p><input type="button" value="Check for updates" onclick="kpCheckUpdates(this)"></p>
+  <p>
+    <input type="button" value="Check for updates" onclick="kpCheckUpdates(this)">
+    <?php if (!$kp_pin_newer && $kp_PINNED !== ''): ?>
+    &nbsp;<input type="button" value="Reinstall <?= kp_h($kp_PINNED) ?>" onclick="kpCall({action:'update',tag:'<?= kp_h($kp_PINNED) ?>',force:'1'},this)">
+    <?php endif; ?>
+  </p>
   <p id="kp-ver-row" style="display:none">
     Switch to:&nbsp;<select id="kp-ver-sel"></select>
     &nbsp;<input type="button" value="Install selected" onclick="kpCall({action:'install',tag:document.getElementById('kp-ver-sel').value},this)">

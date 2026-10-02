@@ -12,10 +12,12 @@
 
 <CHANGES>
 ### __VERSION__
-- Built by GHA from tools/unraid/komodo-periphery/src/
+- Built by GHA from unraid/komodo-periphery/src/
+- Targets Komodo Periphery __KOMODO_VERSION__ (pinned in versions.env)
 - Native UnRaid daemon (no Docker required)
 - Noise private/public key authentication
-- Version selection and updates via the web UI
+- Updates an already-installed binary to the targeted release on plugin update
+- Version selection and manual updates via the web UI
 </CHANGES>
 
 <!-- Runtime package: rc script, web UI, event hooks (embedded txz) -->

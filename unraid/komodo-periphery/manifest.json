@@ -10,6 +10,12 @@
     "__INSTALL_SH__": "src/install.sh",
     "__REMOVE_SH__": "src/remove.sh"
   },
+  "version_pins": {
+    "file": "versions.env",
+    "pins": {
+      "__KOMODO_VERSION__": "KOMODO_VERSION"
+    }
+  },
   "txz": {
     "name": "komodo-periphery",
     "placeholder": "__TXZ_B64__",
@@ -23,12 +29,14 @@
       {
         "src": "api.php",
         "dest": "usr/local/emhttp/plugins/komodo-periphery/api.php",
-        "mode": "0644"
+        "mode": "0644",
+        "substitute": true
       },
       {
         "src": "komodo-periphery.page",
         "dest": "usr/local/emhttp/plugins/komodo-periphery/komodo-periphery.page",
-        "mode": "0644"
+        "mode": "0644",
+        "substitute": true
       },
       {
         "src": "event-started",
