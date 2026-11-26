@@ -27,9 +27,21 @@ set -euo pipefail
 drv_c="${DRIVER_SRC}/amdxdna_pci_drv.c"
 [[ -f "${drv_c}" ]] || { echo "ERROR: ${drv_c} not found" >&2; exit 1; }
 
+# Upstream moves code between files (the version defines and
+# amdxdna_client_cleanup went from amdxdna_pci_drv.c to amdxdna_drm.c), so
+# find each patch target by content instead of by file name.
+find_src() {
+  local f
+  f=$(grep -l -- "$1" "${DRIVER_SRC}"/*.c | head -n1 || true)
+  [[ -n "${f}" ]] || { echo "ERROR: no source in ${DRIVER_SRC} matches '$1'" >&2; exit 1; }
+  printf '%s' "${f}"
+}
+ver_c=$(find_src 'define[[:space:]]\+AMDXDNA_DRIVER_MAJOR')
+cleanup_c=$(find_src '^static void amdxdna_client_cleanup(')
+
 # Extract MAJOR.MINOR version from source defines.
-xdna_major=$(grep -m1 'define[[:space:]]\+AMDXDNA_DRIVER_MAJOR' "${drv_c}" | grep -oP '\d+$')
-xdna_minor=$(grep -m1 'define[[:space:]]\+AMDXDNA_DRIVER_MINOR' "${drv_c}" | grep -oP '\d+$')
+xdna_major=$(grep -m1 'define[[:space:]]\+AMDXDNA_DRIVER_MAJOR' "${ver_c}" | grep -oP '\d+$')
+xdna_minor=$(grep -m1 'define[[:space:]]\+AMDXDNA_DRIVER_MINOR' "${ver_c}" | grep -oP '\d+$')
 xdna_modver="${xdna_major}.${xdna_minor}"
 echo "Driver version: ${xdna_modver} (kernel: ${KERNEL_VERSION})"
 
@@ -37,6 +49,8 @@ echo "Driver version: ${xdna_modver} (kernel: ${KERNEL_VERSION})"
 # source hardcodes "0.1" which XRT reads from /sys/module/amdxdna/version and
 # rejects as incompatible. Replace it with the version from the source defines.
 sed -i "s/MODULE_VERSION(\"[^\"]*\")/MODULE_VERSION(\"${xdna_modver}\")/" "${drv_c}"
+grep -qF "MODULE_VERSION(\"${xdna_modver}\")" "${drv_c}" \
+  || { echo "ERROR: MODULE_VERSION was not rewritten in ${drv_c}" >&2; exit 1; }
 
 # Fix: amdxdna_sva_fini must be called before mmdrop(client->mm).
 # When FLM terminates dirty (SIGKILL / container stop), mm_users has already
@@ -56,9 +70,16 @@ awk '
     $0 = nxt
   }
   { print }
-' "${drv_c}" > "${drv_c}.tmp" && mv "${drv_c}.tmp" "${drv_c}"
-grep -q 'amdxdna_sva_fini(client)' "${drv_c}" \
-  || { echo "ERROR: SVA ordering patch was not applied to ${drv_c}" >&2; exit 1; }
+' "${cleanup_c}" > "${cleanup_c}.tmp" && mv "${cleanup_c}.tmp" "${cleanup_c}"
+# Verify inside amdxdna_client_cleanup: sva_fini present and before mmdrop.
+awk '
+  /^static void amdxdna_client_cleanup\(/ { in_fn = 1 }
+  in_fn && /^\}/ { in_fn = 0 }
+  in_fn && /amdxdna_sva_fini\(client\);/ { sva = NR }
+  in_fn && /mmdrop\(client->mm\);/ { mm = NR }
+  END { exit !(sva && (!mm || sva < mm)) }
+' "${cleanup_c}" \
+  || { echo "ERROR: SVA ordering patch was not applied to ${cleanup_c}" >&2; exit 1; }
 echo "Applied amdxdna_client_cleanup SVA-before-mmdrop fix"
 
 # Build the out-of-tree kernel module.
