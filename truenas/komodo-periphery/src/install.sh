@@ -8,6 +8,11 @@
 # Install:   scp output/komodo-periphery-*.run <host>:/tmp/
 #            ssh <host> bash /tmp/komodo-periphery-*.run
 # Update:    ssh <host> bash /tmp/komodo-periphery-*.run --update
+#
+# Every successful run copies the installer to $INSTALLER on the persistent
+# config dataset and registers a POSTINIT task that runs it with --boot.
+# TrueNAS upgrades replace /etc and /var/lib (the sysext and the unit), so
+# without that task Periphery is gone after the first upgrade.
 
 set -euo pipefail
 
@@ -20,6 +25,8 @@ RAW=/var/lib/extensions/komodo-periphery.raw
 VERSION_FILE=/var/lib/extensions/komodo-periphery.version
 CONFIG_DIR=/etc/komodo
 CONFIG_FILE=$CONFIG_DIR/periphery.config.toml
+INSTALLER=$CONFIG_DIR/installer/komodo-periphery.run
+BOOT_LOG=/var/log/komodo-periphery-boot.log
 
 MODE=install
 FORCE=false
@@ -35,6 +42,10 @@ Usage: bash $(basename "$0") [option]
   -u, --update     Non-interactive in-place update. Swaps the sysext for the
                    version carried by this installer and restarts the service.
                    ${CONFIG_FILE} and the Noise keys are left untouched.
+  -b, --boot       Run by the POSTINIT task from $INSTALLER. Starts the
+                   service when the sysext is in place, otherwise reinstalls it
+                   non-interactively (after a TrueNAS upgrade). Logs to
+                   $BOOT_LOG.
   -c, --check      Report the installed version against this installer's (and
                    the newest upstream release, if GitHub is reachable), then
                    exit without changing anything.
@@ -48,6 +59,7 @@ USAGE
 while [ $# -gt 0 ]; do
     case "$1" in
         -u|--update)  MODE=update ;;
+        -b|--boot)    MODE=boot ;;
         -c|--check)   MODE=check ;;
         -f|--force)   FORCE=true ;;
         -V|--version) printf '%s\n' "$EMBEDDED_VERSION"; exit 0 ;;
@@ -80,6 +92,12 @@ version_lt() {
     [ "$1" != "$2" ] &&
         [ "$(printf '%s\n%s\n' "$1" "$2" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)" = "$1" ]
 }
+
+if [ "$MODE" = boot ]; then
+    exec >>"$BOOT_LOG" 2>&1
+    echo ""
+    echo "=== $(date -Is) komodo-periphery --boot ==="
+fi
 
 # -- Probe --------------------------------------------------------------------
 
@@ -132,6 +150,21 @@ if [ "$MODE" = check ]; then
         echo "      once Core is on the newer release."
     fi
     exit 0
+fi
+
+# -- Boot preflight -----------------------------------------------------------
+# Same boot environment as last time: the sysext and unit are still there, so
+# only make sure the service runs. A missing sysext or a version mismatch means
+# a TrueNAS upgrade (or a newer installer copy) and falls through to a reinstall.
+
+if [ "$MODE" = boot ]; then
+    if [ -f "$RAW" ] && [ "$_installed" = "$EMBEDDED_VERSION" ] \
+        && [ -f /etc/systemd/system/komodo-periphery.service ]; then
+        systemctl enable --now komodo-periphery
+        echo "OK: $EMBEDDED_VERSION already installed, service started."
+        exit 0
+    fi
+    echo "Sysext or unit missing (or version mismatch): reinstalling $EMBEDDED_VERSION."
 fi
 
 # -- Update preflight ---------------------------------------------------------
@@ -251,7 +284,7 @@ fi
 _marker=$(grep -n '^__PAYLOAD__$' "$0" | cut -d: -f1)
 [ -n "$_marker" ] || { echo "ERROR: payload marker not found -- was this script assembled by the Dockerfile?" >&2; exit 1; }
 
-if [ "$MODE" = update ]; then
+if [ "$MODE" != install ]; then
     # The running process keeps the old sysext inode open, so it has to go
     # before the image is swapped and systemd-sysext refreshed.
     echo ""
@@ -309,43 +342,42 @@ rmdir /etc/systemd/system/komodo-periphery.service.d 2>/dev/null || true
 
 systemctl daemon-reload
 
-# -- Register boot-time mount ------------------------------------------------
+# -- Register boot-time init tasks ------------------------------------------
+# Matched by comment; created when missing, rewritten when the command, phase,
+# timeout or enabled flag drifted.
+
+ensure_init_task() {
+    WHEN="$1" CMD="$2" COMMENT="$3" TIMEOUT="$4" python3 - <<'PY'
+import json, os, subprocess
+
+def midclt(*args):
+    return subprocess.run(["midclt", "call", *args], check=True,
+                          capture_output=True, text=True).stdout
+
+want = {"type": "COMMAND", "command": os.environ["CMD"],
+        "when": os.environ["WHEN"], "enabled": True,
+        "timeout": int(os.environ["TIMEOUT"]), "comment": os.environ["COMMENT"]}
+found = json.loads(midclt("initshutdownscript.query",
+                          json.dumps([["comment", "=", want["comment"]]])))
+label = f'{want["when"]} task "{want["comment"]}"'
+if not found:
+    midclt("initshutdownscript.create", json.dumps(want))
+    print(f"OK: created {label}")
+elif any(found[0].get(k) != v for k, v in want.items()):
+    midclt("initshutdownscript.update", str(found[0]["id"]), json.dumps(want))
+    print(f'OK: updated {label} (id={found[0]["id"]})')
+else:
+    print(f'OK: {label} up to date (id={found[0]["id"]})')
+PY
+}
 
 echo ""
-echo "=== Registering boot-time config mount ==="
-
-_expected_cmd="/sbin/zfs mount boot-pool/komodo-periphery-config"
-_expected_comment="Mount komodo-periphery config dataset on boot"
-
-# Find existing script by comment (unique per install)
-_existing_id=$(midclt call initshutdownscript.query \
-    "[[\"comment\", \"=\", \"$_expected_comment\"]]" 2>/dev/null \
-    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["id"] if d else "")' 2>/dev/null || true)
-
-if [ -z "$_existing_id" ]; then
-    echo "Creating PREINIT mount script"
-    midclt call initshutdownscript.create "{
-      \"type\": \"COMMAND\",
-      \"command\": \"$_expected_cmd\",
-      \"when\": \"PREINIT\",
-      \"enabled\": true,
-      \"comment\": \"$_expected_comment\"
-    }" >/dev/null && echo "OK: PREINIT mount script created"
-else
-    _existing_cmd=$(midclt call initshutdownscript.query "[[\"id\", \"=\", $_existing_id]]" 2>/dev/null \
-        | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d[0]["command"] if d else "")' 2>/dev/null || true)
-    if [ "$_existing_cmd" != "$_expected_cmd" ]; then
-        echo "Updating PREINIT mount script (id=$_existing_id)"
-        midclt call initshutdownscript.update "$_existing_id" "{
-          \"type\": \"COMMAND\",
-          \"command\": \"$_expected_cmd\",
-          \"when\": \"PREINIT\",
-          \"enabled\": true
-        }" >/dev/null && echo "OK: PREINIT mount script updated"
-    else
-        echo "OK: PREINIT mount script already up to date (id=$_existing_id)"
-    fi
-fi
+echo "=== Registering boot-time init tasks ==="
+ensure_init_task PREINIT "/sbin/zfs mount $CONFIG_DATASET" \
+    "Mount komodo-periphery config dataset on boot" 10
+# Extracting and merging the sysext takes a few seconds; 10s is too tight.
+ensure_init_task POSTINIT "/bin/bash $INSTALLER --boot" \
+    "Reinstall/start komodo-periphery after boot or upgrade" 120
 
 # -- Write config -------------------------------------------------------------
 
@@ -394,11 +426,22 @@ echo ""
 echo "=== Starting komodo-periphery ==="
 systemctl enable --now komodo-periphery
 
+# -- Persist installer --------------------------------------------------------
+# The POSTINIT task runs this copy, so it must carry the version just installed.
+
+if [ "$(readlink -f "$0")" != "$INSTALLER" ]; then
+    install -d -m 0750 "$(dirname "$INSTALLER")"
+    cp -f "$0" "$INSTALLER.new"
+    chmod 0750 "$INSTALLER.new"
+    mv -f "$INSTALLER.new" "$INSTALLER"
+    echo "OK: installer saved to $INSTALLER"
+fi
+
 # -- Update: report and stop here ---------------------------------------------
 # The node is already paired, so there is no key to print and no config to
 # nudge the operator about.
 
-if [ "$MODE" = update ]; then
+if [ "$MODE" != install ]; then
     echo ""
     systemctl --no-pager --lines=0 status komodo-periphery || true
     echo ""

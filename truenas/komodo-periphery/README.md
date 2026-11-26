@@ -58,6 +58,7 @@ the PREINIT mount script and `/etc/systemd/system` unit are re-asserted.
 
 Other flags:
 
+- `--boot` - used by the POSTINIT task (see above)
 - `--check` - report installed vs. carried vs. newest upstream version and exit
   without changing anything
 - `--force` - with `--update`, reinstall the same version or downgrade
