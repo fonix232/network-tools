@@ -1,5 +1,10 @@
 [
   {
+    "base_version": "6.18.52",
+    "truenas_tag": "TS-27.0.0-RC.1",
+    "xdna_ref": "main"
+  },
+  {
     "base_version": "6.18.23",
     "truenas_tag": "TS-26.0.0-BETA.2",
     "xdna_ref": "main"
