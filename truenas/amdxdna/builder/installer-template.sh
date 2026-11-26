@@ -57,7 +57,6 @@ main() {
   local module_raw="amdxdna-${base_krel}.raw"
   local firmware_raw="amdxdna-firmware.raw"
 
-  local tmp_dir
   tmp_dir="$(mktemp -d)"
 
   _cleanup() {
