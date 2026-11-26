@@ -222,14 +222,16 @@ jobs:
           bash builder/build_module_sysext.sh \
             src/amdxdna-dkms/drivers/accel/amdxdna/amdxdna.ko
 
-      - name: Cache module sysext image
-        uses: actions/cache/save@v4
+      - name: Upload module sysext image
+        uses: actions/upload-artifact@v7
         with:
+          name: amdxdna-raw-${{ matrix.kernel.slug }}-${{ matrix.mode }}
           path: |
             truenas/amdxdna/amdxdna-*.raw
             truenas/amdxdna/module_version.txt
             truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-${{ matrix.kernel.slug }}-${{ matrix.mode }}
+          retention-days: 1
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Job 5: package
@@ -259,60 +261,13 @@ jobs:
           key: amdxdna-firmware-raw-${{ needs.build-firmware.outputs.fw_commit }}
           fail-on-cache-miss: true
 
-      # ── Restore per-kernel module .raw (one step per matrix entry × mode) ──
-      - uses: actions/cache/restore@v4
+      # ── Restore every kernel's module .raw (whatever the matrix built) ────
+      - name: Download module sysext images
+        uses: actions/download-artifact@v7
         with:
-          path: |
-            truenas/amdxdna/amdxdna-*.raw
-            truenas/amdxdna/module_version.txt
-            truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.2-production
-          fail-on-cache-miss: true
-
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            truenas/amdxdna/amdxdna-*.raw
-            truenas/amdxdna/module_version.txt
-            truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.2-debug
-          fail-on-cache-miss: true
-
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            truenas/amdxdna/amdxdna-*.raw
-            truenas/amdxdna/module_version.txt
-            truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-production
-          fail-on-cache-miss: false
-
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            truenas/amdxdna/amdxdna-*.raw
-            truenas/amdxdna/module_version.txt
-            truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-TS-26.0.0-BETA.1-debug
-          fail-on-cache-miss: false
-
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            truenas/amdxdna/amdxdna-*.raw
-            truenas/amdxdna/module_version.txt
-            truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-truenas-linux-6.18-production
-          fail-on-cache-miss: false
-
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            truenas/amdxdna/amdxdna-*.raw
-            truenas/amdxdna/module_version.txt
-            truenas/amdxdna/xrt_version.txt
-          key: amdxdna-raw-${{ github.run_id }}-truenas-linux-6.18-debug
-          fail-on-cache-miss: false
+          pattern: amdxdna-raw-*
+          path: truenas/amdxdna
+          merge-multiple: true
 
       # ── Assemble amdxdna-override .run ────────────────────────────────────
       - name: Assemble amdxdna-override .run installer
