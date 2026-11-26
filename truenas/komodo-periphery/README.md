@@ -56,6 +56,23 @@ refreshes systemd-sysext and starts the service again.
 `/etc/komodo/periphery.config.toml` and the Noise keys are left untouched, and
 the PREINIT mount script and `/etc/systemd/system` unit are re-asserted.
 
+## Surviving TrueNAS upgrades
+
+An upgrade boots a fresh boot environment, which drops the sysext in
+`/var/lib/extensions` and the unit in `/etc/systemd/system`. Only the
+`boot-pool/komodo-periphery-config` dataset (`/etc/komodo`) and the init tasks
+in the TrueNAS config database carry over. So every successful install or
+update:
+
+- copies the installer to `/etc/komodo/installer/komodo-periphery.run`;
+- registers (or corrects) two init tasks, matched by comment:
+  - PREINIT `zfs mount boot-pool/komodo-periphery-config`;
+  - POSTINIT `bash /etc/komodo/installer/komodo-periphery.run --boot`.
+
+`--boot` starts the service when the sysext and unit are present and match the
+installer's version. Otherwise it reinstalls non-interactively, keeping the
+config and keys. It logs to `/var/log/komodo-periphery-boot.log`.
+
 Other flags:
 
 - `--boot` - used by the POSTINIT task (see above)
