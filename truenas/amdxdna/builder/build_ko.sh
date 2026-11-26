@@ -82,6 +82,22 @@ awk '
   || { echo "ERROR: SVA ordering patch was not applied to ${cleanup_c}" >&2; exit 1; }
 echo "Applied amdxdna_client_cleanup SVA-before-mmdrop fix"
 
+# configure_kernel.sh's probe for a refcount_t pages_use_count (kernel 6.16+)
+# reports "no" on the TrueNAS 6.18 kernels, which do have it, and the fallback
+# path then fails to compile (`!shmem->pages_use_count` on a refcount_t). Read
+# the type from the headers instead of trusting the compile probe.
+cfg_h="${DRIVER_SRC}/config_kernel.h"
+shmem_h="${KERNEL_SRC}/include/drm/drm_gem_shmem_helper.h"
+[[ -f "${cfg_h}" ]] || { echo "ERROR: ${cfg_h} not found (run configure_kernel.sh first)" >&2; exit 1; }
+[[ -f "${shmem_h}" ]] || { echo "ERROR: ${shmem_h} not found" >&2; exit 1; }
+if grep -q 'refcount_t[[:space:]]\+pages_use_count;' "${shmem_h}" \
+  && ! grep -q 'define HAVE_6_16_shmem_pages_use_count_refcnt' "${cfg_h}"; then
+  sed -i '/^#define AMDXDNA_CONFIG_KERNEL_H$/a #define HAVE_6_16_shmem_pages_use_count_refcnt 1' "${cfg_h}"
+  grep -q 'define HAVE_6_16_shmem_pages_use_count_refcnt' "${cfg_h}" \
+    || { echo "ERROR: could not add HAVE_6_16_shmem_pages_use_count_refcnt to ${cfg_h}" >&2; exit 1; }
+  echo "Overrode probe: HAVE_6_16_shmem_pages_use_count_refcnt (refcount_t in ${shmem_h##*/})"
+fi
+
 # Build the out-of-tree kernel module.
 KBUILD_MODPOST_WARN=1 make -C "${KERNEL_SRC}" \
   M="${DRIVER_SRC}" \
